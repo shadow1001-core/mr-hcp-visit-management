@@ -1,0 +1,36 @@
+# Local Codex workspace directories
+work/
+outputs/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+htmlcov/
+.coverage
+
+# Node.js
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# IDE and operating system
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local databases
+*.log
+*.sqlite
+*.sqlite3
+
