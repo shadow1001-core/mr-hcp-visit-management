@@ -24,6 +24,9 @@ import type {
   ComplianceFindingView,
   ComplianceStatus,
   CoordinatesRequest,
+  DetailingRecordView,
+  MaterialDistributionView,
+  ReferenceView,
   VisitStatus,
   VisitWorkflowDetail,
 } from '../../api/types'
@@ -109,6 +112,11 @@ const findingColumns: TableColumnsType<ComplianceFindingView> = [
 
 function referenceLabel(reference: { code: string; name: string }) {
   return `${reference.name}（${reference.code}）`
+}
+
+function productLabel(productId: string, products: ReferenceView[]) {
+  const product = products.find((candidate) => candidate.id === productId)
+  return product ? referenceLabel(product) : productId
 }
 
 function coordinateLabel(latitude: string, longitude: string) {
@@ -436,6 +444,138 @@ export function VisitDetailPage() {
             pagination={false}
             size="middle"
           />
+        )}
+      </section>
+
+      <section className="detail-panel">
+        <div className="detail-section-heading">
+          <Typography.Title level={4}>拜访报告</Typography.Title>
+          {detail.report && (
+            <Typography.Text type="secondary">
+              最近提交：{formatBusinessDateTime(detail.report.submittedAt)}
+            </Typography.Text>
+          )}
+        </div>
+        {!detail.report ? (
+          <Alert
+            type="info"
+            showIcon
+            message={
+              detail.status === 'CHECKED_OUT'
+                ? '尚未提交拜访报告。'
+                : '完成签退后可提交拜访报告。'
+            }
+          />
+        ) : (
+          <Space direction="vertical" size={24} className="full-width">
+            <Descriptions bordered column={2} size="middle">
+              <Descriptions.Item label="首次创建时间">
+                {formatBusinessDateTime(detail.report.createdAt)}
+              </Descriptions.Item>
+              <Descriptions.Item label="最近提交时间">
+                {formatBusinessDateTime(detail.report.submittedAt)}
+              </Descriptions.Item>
+              <Descriptions.Item label="谈话要点" span={2}>
+                <Typography.Paragraph className="report-readonly-text">
+                  {detail.report.conversationSummary}
+                </Typography.Paragraph>
+              </Descriptions.Item>
+              <Descriptions.Item label="医生反馈" span={2}>
+                <Typography.Paragraph className="report-readonly-text">
+                  {detail.report.hcpFeedback}
+                </Typography.Paragraph>
+              </Descriptions.Item>
+              <Descriptions.Item label="备注" span={2}>
+                <Typography.Paragraph className="report-readonly-text">
+                  {detail.report.notes || '—'}
+                </Typography.Paragraph>
+              </Descriptions.Item>
+            </Descriptions>
+
+            <div>
+              <Typography.Title level={5} className="detail-subsection-title">
+                实际沟通产品与学术内容
+              </Typography.Title>
+              <Table<DetailingRecordView>
+                rowKey="productId"
+                columns={[
+                  {
+                    title: '产品',
+                    dataIndex: 'productId',
+                    width: 300,
+                    render: (productId: string) =>
+                      productLabel(productId, plan.targetProducts),
+                  },
+                  {
+                    title: '学术内容说明',
+                    dataIndex: 'contentSummary',
+                    render: (contentSummary: string) => (
+                      <div className="report-readonly-text">
+                        {contentSummary}
+                      </div>
+                    ),
+                  },
+                ]}
+                dataSource={detail.report.detailingRecords}
+                pagination={false}
+                size="middle"
+              />
+            </div>
+
+            <div>
+              <Typography.Title level={5} className="detail-subsection-title">
+                学术资料派发
+              </Typography.Title>
+              {detail.report.materialDistributions.length === 0 ? (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="未派发学术资料"
+                />
+              ) : (
+                <Table<MaterialDistributionView>
+                  rowKey="id"
+                  columns={[
+                    {
+                      title: '资料名称',
+                      dataIndex: 'materialName',
+                    },
+                    {
+                      title: '资料编码',
+                      dataIndex: 'materialCode',
+                      width: 180,
+                    },
+                    {
+                      title: '关联产品',
+                      dataIndex: 'productId',
+                      width: 260,
+                      render: (productId: string | null) =>
+                        productId
+                          ? productLabel(productId, plan.targetProducts)
+                          : '通用资料',
+                    },
+                    {
+                      title: '数量',
+                      dataIndex: 'quantity',
+                      width: 90,
+                    },
+                    {
+                      title: '资料合规',
+                      dataIndex: 'isCompliant',
+                      width: 110,
+                      render: (isCompliant: boolean) => (
+                        <Tag color={isCompliant ? 'green' : 'red'}>
+                          {isCompliant ? '合规' : '不合规'}
+                        </Tag>
+                      ),
+                    },
+                  ]}
+                  dataSource={detail.report.materialDistributions}
+                  pagination={false}
+                  size="middle"
+                />
+              )}
+            </div>
+          </Space>
         )}
       </section>
 

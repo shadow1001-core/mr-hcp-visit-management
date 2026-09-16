@@ -180,6 +180,18 @@ body {
   margin-bottom: 0;
 }
 
+.report-readonly-text,
+.report-readonly-text.ant-typography {
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detail-subsection-title.ant-typography {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
 .coordinate-modal-content {
   display: flex;
   flex-direction: column;
