@@ -35,9 +35,9 @@ const navigationItems = [
     label: <Link to="/dashboard/products">产品月度看板</Link>,
   },
   {
-    key: '/health',
+    key: '/system/health',
     icon: <HeartOutlined />,
-    label: <Link to="/health">系统状态</Link>,
+    label: <Link to="/system/health">系统状态</Link>,
   },
 ]
 
@@ -51,8 +51,8 @@ function activeNavigationKey(pathname: string): string {
   if (pathname.startsWith('/visits')) {
     return '/visits'
   }
-  if (pathname === '/health') {
-    return '/health'
+  if (pathname === '/system/health') {
+    return '/system/health'
   }
   return ''
 }
@@ -95,7 +95,7 @@ export function App() {
               path="/dashboard/products"
               element={<ProductDashboardPage />}
             />
-            <Route path="/health" element={<HealthPage />} />
+            <Route path="/system/health" element={<HealthPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </Content>

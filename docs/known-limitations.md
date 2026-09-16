@@ -37,3 +37,9 @@ Service 使用计划产品校验实际沟通产品，而数据库复合外键要
 
 现有测试验证数据库升级到 Alembic head，但没有在 pytest 内检查 ORM metadata 与 migration 是否
 漂移。当前需额外运行 `alembic check`；后续可将其纳入自动化质量门禁。
+
+## KL-008 前端首屏产物体积偏大
+
+当前 Vite 生产构建可以成功，但主 JavaScript chunk 约为 1.85 MB（gzip 后约 602 KB），超过 Vite
+默认的 500 KB 提示阈值。主要来源是 Ant Design 与 ECharts 同步进入首屏包；MVP 功能和桌面端
+演示不受影响。后续可通过路由懒加载和手工拆分 vendor chunk 优化，不应仅调高告警阈值隐藏问题。

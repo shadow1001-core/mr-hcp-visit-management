@@ -4,16 +4,18 @@ A desktop web application for planning, recording, and reviewing regulated acade
 
 ## Status
 
-The repository contains the runnable project scaffold:
+The repository contains the runnable MVP:
 
 - FastAPI, SQLAlchemy 2, Alembic, Pydantic Settings, PostgreSQL configuration, and pytest;
 - React, TypeScript, Vite, Ant Design, React Router, and Axios;
+- visit planning, check-in/check-out compliance evaluation, report management, and a monthly product dashboard;
 - health endpoints/pages and shared development commands.
 
-Visit business features are intentionally not implemented yet. The confirmed design is documented under [`docs/`](docs/).
+The confirmed business and technical design is documented under [`docs/`](docs/).
 
 ## Prerequisites
 
+- Docker with Docker Compose for the one-command stack; or
 - Python 3.12, managed locally with [uv](https://docs.astral.sh/uv/);
 - Node.js 22 or later;
 - PostgreSQL for database-backed development. The health endpoint does not require a live database.
@@ -27,6 +29,28 @@ cp .env.example .env
 ```
 
 Secrets and local `.env` files must not be committed.
+
+## Docker Compose
+
+Copy the example environment file, replace the placeholder password in all related values,
+then start PostgreSQL, the migrated API, and the production frontend:
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+docker compose exec backend uv run --locked --no-sync python -m app.db.seed
+```
+
+The application is available at `http://localhost:5173`, the API at
+`http://localhost:8000`, and the API health endpoint at `GET /health`.
+Database migrations run before the backend starts. Seed data remains an explicit command and
+is never loaded implicitly in production startup.
+
+Stop the stack with:
+
+```bash
+docker compose down
+```
 
 ## Backend
 
