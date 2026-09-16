@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.db.seed import run_seed
@@ -21,3 +22,8 @@ def test_seed_refuses_to_run_in_production_before_connecting() -> None:
 
     with pytest.raises(RuntimeError, match="APP_ENV=production"):
         run_seed(settings)
+
+
+def test_business_timezone_must_be_valid_iana_name() -> None:
+    with pytest.raises(ValidationError, match="valid IANA timezone"):
+        Settings(_env_file=None, business_timezone="Mars/Olympus_Mons")

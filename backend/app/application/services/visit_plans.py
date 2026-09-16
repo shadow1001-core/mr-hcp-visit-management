@@ -82,6 +82,31 @@ class CheckOutCommand:
     longitude: Decimal
 
 
+@dataclass(frozen=True)
+class DetailingRecordInput:
+    product_id: UUID
+    content_summary: str
+
+
+@dataclass(frozen=True)
+class MaterialDistributionInput:
+    product_id: UUID | None
+    material_code: str
+    material_name: str
+    quantity: int
+    is_compliant: bool
+
+
+@dataclass(frozen=True)
+class UpsertVisitReportCommand:
+    workflow_id: UUID
+    conversation_summary: str
+    hcp_feedback: str
+    notes: str | None
+    detailing_records: list[DetailingRecordInput]
+    material_distributions: list[MaterialDistributionInput]
+
+
 ComplianceEvaluator = Callable[[VisitComplianceInput], ComplianceResult]
 
 
@@ -336,6 +361,129 @@ class VisitPlanService:
             )
             return plan
 
+    def upsert_report(self, request: UpsertVisitReportCommand) -> VisitPlan:
+        with self.session.begin():
+            plan = self.repository.lock_workflow(request.workflow_id)
+            if plan is None:
+                raise BusinessError(
+                    code="VISIT_WORKFLOW_NOT_FOUND",
+                    message="The visit workflow was not found.",
+                    status_code=404,
+                    details=[
+                        ErrorDetail(field="id", reason="NOT_FOUND", value=request.workflow_id)
+                    ],
+                )
+            visit = self.repository.find_visit_for_plan(plan.id)
+            if visit is None or visit.check_out_at is None:
+                raise BusinessError(
+                    code="VISIT_NOT_CHECKED_OUT",
+                    message="The visit must be checked out before submitting a report.",
+                    status_code=409,
+                    details=[
+                        ErrorDetail(
+                            field="id", reason="VISIT_NOT_CHECKED_OUT", value=request.workflow_id
+                        )
+                    ],
+                )
+
+            detailing_product_ids = [item.product_id for item in request.detailing_records]
+            if not detailing_product_ids:
+                raise BusinessError(
+                    code="DETAILING_RECORDS_REQUIRED",
+                    message="At least one detailing product is required.",
+                    status_code=422,
+                    details=[ErrorDetail(field="detailingRecords", reason="AT_LEAST_ONE_REQUIRED")],
+                )
+            if len(detailing_product_ids) != len(set(detailing_product_ids)):
+                raise BusinessError(
+                    code="DUPLICATE_DETAILING_PRODUCT",
+                    message="Detailing products must not contain duplicates.",
+                    status_code=422,
+                    details=[ErrorDetail(field="detailingRecords", reason="DUPLICATE_PRODUCT")],
+                )
+
+            invalid_material_indexes = [
+                index
+                for index, item in enumerate(request.material_distributions)
+                if item.quantity < 0
+            ]
+            if invalid_material_indexes:
+                raise BusinessError(
+                    code="INVALID_MATERIAL_QUANTITY",
+                    message="Material quantity must be a non-negative integer.",
+                    status_code=422,
+                    details=[
+                        ErrorDetail(
+                            field=f"materialDistributions.{index}.quantity",
+                            reason="MUST_BE_NONNEGATIVE",
+                        )
+                        for index in invalid_material_indexes
+                    ],
+                )
+
+            plan_product_ids = self.repository.get_plan_product_ids(plan.id)
+            unexpected_detailing_ids = [
+                product_id
+                for product_id in detailing_product_ids
+                if product_id not in plan_product_ids
+            ]
+            if unexpected_detailing_ids:
+                raise BusinessError(
+                    code="REPORT_PRODUCT_NOT_IN_PLAN",
+                    message="Every detailing product must be a target product of the visit plan.",
+                    status_code=422,
+                    details=[
+                        ErrorDetail(
+                            field="detailingRecords.productId",
+                            reason="NOT_IN_PLAN",
+                            value=product_id,
+                        )
+                        for product_id in unexpected_detailing_ids
+                    ],
+                )
+
+            unexpected_material_ids = [
+                item.product_id
+                for item in request.material_distributions
+                if item.product_id is not None and item.product_id not in plan_product_ids
+            ]
+            if unexpected_material_ids:
+                raise BusinessError(
+                    code="REPORT_PRODUCT_NOT_IN_VISIT",
+                    message="A material references a product outside this visit.",
+                    status_code=422,
+                    details=[
+                        ErrorDetail(
+                            field="materialDistributions.productId",
+                            reason="NOT_IN_VISIT",
+                            value=product_id,
+                        )
+                        for product_id in unexpected_material_ids
+                    ],
+                )
+
+            self.repository.replace_report(
+                visit=visit,
+                conversation_summary=request.conversation_summary,
+                hcp_feedback=request.hcp_feedback,
+                notes=request.notes,
+                submitted_at=self.clock.now().astimezone(UTC),
+                detailing_records=[
+                    (item.product_id, item.content_summary) for item in request.detailing_records
+                ],
+                material_distributions=[
+                    (
+                        item.product_id,
+                        item.material_code,
+                        item.material_name,
+                        item.quantity,
+                        item.is_compliant,
+                    )
+                    for item in request.material_distributions
+                ],
+            )
+            return plan
+
     @staticmethod
     def _validate_range(
         start: datetime | None, end: datetime | None, *, prefix: str = "planned"
@@ -472,7 +620,7 @@ def allowed_actions(plan: VisitPlan) -> list[str]:
         "PLANNED": ["CHECK_IN"],
         "CHECKED_IN": ["CHECK_OUT"],
         "CHECKED_OUT": ["SUBMIT_REPORT"],
-        "REPORTED": [],
+        "REPORTED": ["UPDATE_REPORT"],
     }[workflow_status(plan)]
 
 

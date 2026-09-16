@@ -5,12 +5,13 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Select, and_, case, exists, func, select
+from sqlalchemy import Select, and_, case, delete, exists, func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.sql.base import ExecutableOption
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import (
+    AcademicDetailingRecord,
     ComplianceFinding,
     ComplianceFindingCode,
     CompliancePhase,
@@ -20,6 +21,7 @@ from app.db.models import (
     HcpPractice,
     Hospital,
     HospitalDepartment,
+    MaterialDistribution,
     MedicalRepresentative,
     Product,
     Visit,
@@ -273,6 +275,73 @@ class VisitPlanRepository:
         ]
         self.session.flush()
         self.session.refresh(visit, attribute_names=["duration_seconds", "updated_at"])
+
+    def get_plan_product_ids(self, plan_id: UUID) -> set[UUID]:
+        return set(
+            self.session.scalars(
+                select(VisitPlanProduct.product_id).where(VisitPlanProduct.plan_id == plan_id)
+            ).all()
+        )
+
+    def replace_report(
+        self,
+        *,
+        visit: Visit,
+        conversation_summary: str,
+        hcp_feedback: str,
+        notes: str | None,
+        submitted_at: datetime,
+        detailing_records: Sequence[tuple[UUID, str]],
+        material_distributions: Sequence[tuple[UUID | None, str, str, int, bool]],
+    ) -> VisitReport:
+        report = visit.report
+        if report is None:
+            report = VisitReport(visit=visit)
+            self.session.add(report)
+        else:
+            self.session.execute(
+                delete(MaterialDistribution).where(MaterialDistribution.visit_id == visit.id)
+            )
+            self.session.execute(
+                delete(AcademicDetailingRecord).where(AcademicDetailingRecord.visit_id == visit.id)
+            )
+
+        report.conversation_summary = conversation_summary
+        report.hcp_feedback = hcp_feedback
+        report.notes = notes
+        report.submitted_at = submitted_at
+        self.session.add_all(
+            [
+                AcademicDetailingRecord(
+                    visit_id=visit.id,
+                    product_id=product_id,
+                    content_summary=content_summary,
+                )
+                for product_id, content_summary in detailing_records
+            ]
+        )
+        self.session.add_all(
+            [
+                MaterialDistribution(
+                    visit_id=visit.id,
+                    product_id=product_id,
+                    material_code=material_code,
+                    material_name=material_name,
+                    quantity=quantity,
+                    is_compliant=is_compliant,
+                )
+                for (
+                    product_id,
+                    material_code,
+                    material_name,
+                    quantity,
+                    is_compliant,
+                ) in material_distributions
+            ]
+        )
+        self.session.flush()
+        self.session.expire(report, ["detailing_records", "material_distributions"])
+        return report
 
     @staticmethod
     def _workflow_base_query() -> Select[tuple[VisitPlan]]:

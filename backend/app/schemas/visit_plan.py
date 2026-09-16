@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from pydantic.alias_generators import to_camel
 from pydantic_core import PydanticCustomError
 
@@ -59,6 +59,75 @@ class CheckInRequest(BaseModel):
 
 class CheckOutRequest(CheckInRequest):
     pass
+
+
+NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+MaterialCodeText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+]
+MaterialNameText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+
+
+class DetailingRecordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    productId: UUID
+    contentSummary: NonBlankText
+
+
+class MaterialDistributionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    productId: UUID | None = None
+    materialCode: MaterialCodeText
+    materialName: MaterialNameText
+    quantity: Annotated[int, Field(strict=True)]
+    isCompliant: bool
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, value: int) -> int:
+        if value < 0:
+            raise PydanticCustomError(
+                "invalid_material_quantity", "quantity must be a non-negative integer"
+            )
+        return value
+
+
+class UpsertVisitReportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversationSummary: NonBlankText
+    hcpFeedback: NonBlankText
+    notes: str | None = None
+    detailingRecords: list[DetailingRecordRequest]
+    materialDistributions: list[MaterialDistributionRequest]
+
+    @field_validator("notes")
+    @classmethod
+    def normalize_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("detailingRecords")
+    @classmethod
+    def validate_detailing_records(
+        cls, value: list[DetailingRecordRequest]
+    ) -> list[DetailingRecordRequest]:
+        if not value:
+            raise PydanticCustomError(
+                "detailing_records_required", "At least one detailing product is required"
+            )
+        product_ids = [item.productId for item in value]
+        if len(product_ids) != len(set(product_ids)):
+            raise PydanticCustomError(
+                "duplicate_detailing_product", "Detailing products must not contain duplicates"
+            )
+        return value
 
 
 class ReferenceView(BaseModel):
@@ -147,6 +216,36 @@ class ComplianceFindingView(BaseModel):
     detected_at: datetime
 
 
+class DetailingRecordView(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    product_id: UUID
+    content_summary: str
+
+
+class MaterialDistributionView(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: UUID
+    product_id: UUID | None
+    material_code: str
+    material_name: str
+    quantity: int
+    is_compliant: bool
+
+
+class VisitReportView(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    conversation_summary: str
+    hcp_feedback: str
+    notes: str | None
+    detailing_records: list[DetailingRecordView]
+    material_distributions: list[MaterialDistributionView]
+    submitted_at: datetime
+    created_at: datetime
+
+
 class ActualVisitView(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -165,5 +264,5 @@ class VisitWorkflowDetail(BaseModel):
     status: VisitStatus
     plan: VisitPlanResponse
     actual_visit: ActualVisitView | None
-    report: dict[str, object] | None
-    allowed_actions: list[Literal["CHECK_IN", "CHECK_OUT", "SUBMIT_REPORT"]]
+    report: VisitReportView | None
+    allowed_actions: list[Literal["CHECK_IN", "CHECK_OUT", "SUBMIT_REPORT", "UPDATE_REPORT"]]

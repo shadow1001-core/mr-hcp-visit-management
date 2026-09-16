@@ -5,8 +5,8 @@
 本文档基于 [业务规则](business-rules.md)、[数据库设计](database-design.md) 和
 [系统架构](architecture.md)，定义 MVP 的 REST API 契约。本文只设计接口，不实现代码。
 
-API 统一以 `/api` 为前缀，使用 JSON。MVP 不提供认证、无计划拜访、计划修改/取消、报告更正、
-文件上传或地图 SDK 接口。
+API 统一以 `/api` 为前缀，使用 JSON。MVP 不提供认证、无计划拜访、计划修改/取消、带审批和
+版本历史的正式报告更正、文件上传或地图 SDK 接口；当前报告允许通过 PUT 整体替换。
 
 ## 2. 资源标识与关键取舍
 
@@ -308,12 +308,12 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 | `report`         | object/null     | `REPORTED` 时存在         |
 | `allowedActions` | string[]        | 当前状态允许的下一步操作  |
 
-`report` 包含 `conversationSummary`、`hcpFeedback`、`detailingRecords`、
+`report` 包含 `conversationSummary`、`hcpFeedback`、可选 `notes`、`detailingRecords`、
 `materialDistributions`、服务端 `submittedAt` 和 `createdAt`。两类子项字段与第 9 节的允许输入相同；
 资料项额外返回服务端生成的 `id`。`report` 在 `REPORTED` 前为 `null`。
 
 `allowedActions` 与状态机严格对应：`PLANNED` 为 `["CHECK_IN"]`，`CHECKED_IN` 为
-`["CHECK_OUT"]`，`CHECKED_OUT` 为 `["SUBMIT_REPORT"]`，`REPORTED` 为空数组。
+`["CHECK_OUT"]`，`CHECKED_OUT` 为 `["SUBMIT_REPORT"]`，`REPORTED` 为 `["UPDATE_REPORT"]`。
 
 成功：`200 OK`。
 
@@ -404,8 +404,8 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 
 ### `PUT /api/visits/{id}/report`
 
-首次创建报告的状态前置条件：只能是 `CHECKED_OUT`，并且尚未存在报告。`REPORTED` 只允许执行
-下文定义的相同内容幂等重试，不允许再次创建或修改。
+本接口使用 PUT 的“完整资源替换”语义：`CHECKED_OUT` 时首次创建报告；`REPORTED` 时允许用完整
+请求整体替换当前报告及全部沟通、资料子项。更新不会修改签到、签退、停留时长或合规 finding。
 
 请求：
 
@@ -413,6 +413,7 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 {
   "conversationSummary": "讨论了适应症和最新临床研究结果。",
   "hcpFeedback": "医生关注长期安全性数据。",
+  "notes": "下月继续跟进安全性资料。",
   "detailingRecords": [
     {
       "productId": "f84b5ef1-3459-4ee2-aeaf-ce1316363094",
@@ -433,38 +434,39 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 
 字段规则：
 
-| 字段                                | 规则                                                               |
-| ----------------------------------- | ------------------------------------------------------------------ |
-| `conversationSummary`               | 必填、去除首尾空白后非空                                           |
-| `hcpFeedback`                       | 必填、去除首尾空白后非空                                           |
-| `detailingRecords`                  | 至少一项；`productId` 不重复，且集合必须与实际拜访产品集合完全一致 |
-| `detailingRecords[].contentSummary` | 非空                                                               |
-| `materialDistributions`             | 必填数组，可为空，表示未派发资料                                   |
-| `materialDistributions[].productId` | 可省略或为 `null`，表示通用资料；非空时必须属于实际拜访产品        |
-| `materialCode` / `materialName`     | 非空                                                               |
-| `quantity`                          | 正整数                                                             |
-| `isCompliant`                       | 必填布尔值                                                         |
+| 字段                                | 规则                                                        |
+| ----------------------------------- | ----------------------------------------------------------- |
+| `conversationSummary`               | 必填、去除首尾空白后非空                                    |
+| `hcpFeedback`                       | 必填、去除首尾空白后非空                                    |
+| `notes`                             | 可选；去除首尾空白，空字符串规范化为 `null`                 |
+| `detailingRecords`                  | 至少一项；`productId` 不重复，且每项都是计划目标产品        |
+| `detailingRecords[].contentSummary` | 去除首尾空白后非空                                          |
+| `materialDistributions`             | 必填数组，可为空，表示未派发资料                            |
+| `materialDistributions[].productId` | 可省略或为 `null`；非空时必须属于本次计划目标产品           |
+| `materialCode` / `materialName`     | 去除首尾空白后非空                                          |
+| `quantity`                          | 非负整数；`0` 合法                                          |
+| `isCompliant`                       | 必填布尔值                                                  |
 
-成功：`200 OK`，返回完整工作流详情，`status = REPORTED`。`submittedAt` 由服务端生成。
+成功：`200 OK`，返回完整工作流详情，`status = REPORTED`。首次创建和每次整体替换都会使用服务端
+UTC Clock 更新 `submittedAt`；`createdAt` 始终保留首次创建时间。
 
 错误：
 
-| 状态  | code                             | 场景                                                     |
-| ----- | -------------------------------- | -------------------------------------------------------- |
-| `404` | `VISIT_WORKFLOW_NOT_FOUND`       | 工作流不存在                                             |
-| `409` | `VISIT_NOT_CHECKED_OUT`          | 当前为 `PLANNED` 或 `CHECKED_IN`                         |
-| `409` | `VISIT_REPORT_ALREADY_SUBMITTED` | 当前为 `REPORTED` 且请求内容与原报告不同；不得覆盖原报告 |
-| `422` | `DETAILING_RECORDS_REQUIRED`     | 沟通记录为空                                             |
-| `422` | `DUPLICATE_DETAILING_PRODUCT`    | 沟通产品重复                                             |
-| `422` | `REPORT_PRODUCT_SET_MISMATCH`    | 沟通产品集合不等于实际产品集合                           |
-| `422` | `REPORT_PRODUCT_NOT_IN_VISIT`    | 资料项引用了非本次拜访产品                               |
-| `422` | `VALIDATION_ERROR`               | 文本、数量、UUID 或结构无效                              |
+| 状态  | code                          | 场景                                   |
+| ----- | ----------------------------- | -------------------------------------- |
+| `404` | `VISIT_WORKFLOW_NOT_FOUND`    | 工作流不存在                           |
+| `409` | `VISIT_NOT_CHECKED_OUT`       | 当前为 `PLANNED` 或 `CHECKED_IN`       |
+| `422` | `DETAILING_RECORDS_REQUIRED`  | 沟通记录为空                           |
+| `422` | `DUPLICATE_DETAILING_PRODUCT` | 沟通产品重复                           |
+| `422` | `REPORT_PRODUCT_NOT_IN_PLAN`  | 沟通产品不是计划目标产品               |
+| `422` | `REPORT_PRODUCT_NOT_IN_VISIT` | 资料项引用了非本次计划目标产品         |
+| `422` | `INVALID_MATERIAL_QUANTITY`   | 资料数量小于 `0`                       |
+| `422` | `UNEXPECTED_FIELD`            | 请求包含契约未允许的字段               |
+| `422` | `VALIDATION_ERROR`            | 文本、非负整数、UUID 或其他结构校验失败 |
 
-重复/幂等：PUT 可安全重试。成功后使用语义相同的完整请求体重试，返回 `200 OK` 和原报告，
-且不更新 `submittedAt`、`createdAt` 或任何子项；使用不同内容重试返回
-`409 VISIT_REPORT_ALREADY_SUBMITTED`。这里的“语义相同”指通过校验和首尾空白规范化后，两个摘要
-相同、沟通记录按 `productId` 组成的映射相同、资料派发项按全部业务字段组成的多重集合相同；数组
-顺序不影响判断。MVP 不提供报告更正或覆盖。
+PUT 每次都把请求视为当前报告的完整目标状态。相同或不同内容均返回 `200 OK` 并以服务端时间
+更新 `submittedAt`；旧沟通和资料子项不会残留。计划行锁保证并发 PUT 串行执行，最后提交成功的
+完整请求成为当前报告。任何失败都会回滚报告和全部子项。
 
 客户端禁止提交 `submittedAt`、`createdAt`、`status`、签到/签退时间、距离、时长、异常或异常
 阈值；出现这些字段返回 `422 UNEXPECTED_FIELD`。
@@ -498,9 +500,10 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
         "code": "PROD-CARD-001",
         "name": "心血管产品 A"
       },
-      "totalVisitCount": 12,
-      "abnormalVisitCount": 3,
-      "compliancePendingVisitCount": 2
+      "totalCount": 12,
+      "normalCount": 7,
+      "abnormalCount": 3,
+      "pendingCount": 2
     }
   ]
 }
@@ -510,12 +513,13 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 
 - 仅统计已签到的 `CHECKED_IN`、`CHECKED_OUT`、`REPORTED`；`PLANNED` 不计入。
 - 使用签到时间所属业务自然月，不使用计划时间或签退时间。
-- 异常拜访仍计入 `totalVisitCount`，并计入 `abnormalVisitCount`。
+- 异常拜访仍计入 `totalCount`，并计入 `abnormalCount`。
 - 同一拜访同一产品最多计数一次；多产品拜访分别计入各产品。
-- 多个异常原因不会重复增加同一产品的 `abnormalVisitCount`。
-- `compliancePendingVisitCount` 统计尚未签退的拜访。当前切片在签退时一次性运行完整合规校验，
-  因此 pending 与 `abnormalVisitCount` 不重叠。
-- 无筛选时只返回当月至少一次拜访的产品，按 `totalVisitCount desc, product.code asc` 排序。
+- 多个异常原因不会重复增加同一产品的 `abnormalCount`。
+- `normalCount` 统计已签退且没有异常的拜访；`pendingCount` 统计尚未签退的拜访。当前切片在签退
+  时一次性运行完整合规校验，因此 pending 与正常、异常均不重叠，并满足
+  `totalCount = normalCount + abnormalCount + pendingCount`。
+- 无筛选时只返回当月至少一次拜访的产品，按 `totalCount desc, product.name asc` 排序。
 - MVP 预计产品数量有限，本聚合接口不分页；列表分页规则不适用于本接口。
 
 错误：
@@ -535,7 +539,7 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 | 创建计划  | `mrId`、`hcpId`、`hospitalId`、`departmentId`、`plannedAt`、`productIds` | `hcpPracticeId`、ID、状态、快照、审计时间、实际拜访数据 |
 | 签到      | `latitude`、`longitude`                                                  | 签到时间、医院坐标快照、距离、状态、实际产品、异常      |
 | 签退      | `latitude`、`longitude`                                                  | 签退时间、距离、时长、状态、异常和阈值                  |
-| 提交报告  | 摘要、反馈、沟通记录、资料派发明细                                       | 提交时间、状态、签到/签退事实、时长、距离、异常         |
+| 提交/更新报告 | 摘要、反馈、可选备注、沟通记录、资料派发明细                          | 提交时间、状态、签到/签退事实、时长、距离、异常         |
 | 查询/看板 | 文档列出的路径和查询参数                                                 | 请求体、业务时区覆盖、客户端统计结果                    |
 
 服务端时间、距离、时长、生命周期状态、合规结论和异常记录始终是服务端可信数据。前端可以输入
@@ -568,11 +572,11 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 | `VISIT_NOT_CHECKED_IN`           | `409` | 尚未签到却请求签退               |
 | `VISIT_ALREADY_CHECKED_OUT`      | `409` | 重复签退                         |
 | `VISIT_NOT_CHECKED_OUT`          | `409` | 尚未签退却提交报告               |
-| `VISIT_REPORT_ALREADY_SUBMITTED` | `409` | 已有报告且再次提交的内容不同     |
 | `DETAILING_RECORDS_REQUIRED`     | `422` | 报告缺少沟通记录                 |
 | `DUPLICATE_DETAILING_PRODUCT`    | `422` | 报告沟通产品重复                 |
-| `REPORT_PRODUCT_SET_MISMATCH`    | `422` | 沟通产品集合与实际产品集合不一致 |
+| `REPORT_PRODUCT_NOT_IN_PLAN`     | `422` | 沟通产品不是计划目标产品         |
 | `REPORT_PRODUCT_NOT_IN_VISIT`    | `422` | 资料引用非本次拜访产品           |
+| `INVALID_MATERIAL_QUANTITY`      | `422` | 资料数量小于 `0`                 |
 
 未预期服务端错误统一返回 `500 INTERNAL_SERVER_ERROR`，`details` 为空；不得返回 SQL、堆栈或敏感配置。
 
@@ -581,6 +585,6 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 - 创建计划及全部目标产品必须在一个事务完成。
 - 签到锁定计划行；实际拜访创建、医院坐标快照、距离结果和产品快照在同一事务完成。本轮不创建签到异常。
 - 签退使用行锁或条件更新，签退事实和新增异常在同一事务完成。
-- 报告、沟通记录和资料派发在一个事务完成；任何子项失败都不产生部分报告。
+- 报告创建或整体替换、沟通记录和资料派发在一个事务完成；任何子项失败都恢复原报告或保持无报告状态。
 - 并发状态冲突使用与顺序重复操作相同的稳定 `409` 错误码。
 - API 不承诺使用数据库约束名作为错误码；Service 层必须把唯一/外键冲突翻译为本文错误码。

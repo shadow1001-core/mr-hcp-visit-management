@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_clock, get_compliance_evaluator, get_db_session
 from app.application.services.visit_plans import CreateVisitPlanCommand, VisitPlanService
 from app.db.models import (
+    AcademicDetailingRecord,
     ComplianceFinding,
     ComplianceFindingCode,
     CompliancePhase,
@@ -26,6 +27,7 @@ from app.db.models import (
     Hcp,
     HcpPractice,
     Hospital,
+    MaterialDistribution,
     MedicalRepresentative,
     Product,
     Visit,
@@ -34,6 +36,7 @@ from app.db.models import (
     VisitProduct,
     VisitReport,
 )
+from app.db.repositories.visit_plans import VisitPlanRepository
 from app.db.seed import seed_reference_data
 from app.domain.compliance import ComplianceResult, VisitComplianceInput
 from app.main import app
@@ -78,6 +81,7 @@ def api_context(migrated_engine: Engine) -> Iterator[ApiTestContext]:
         "department_endo": _id_by_code(setup_session, Department, "DEPT-ENDO"),
         "product_card_a": _id_by_code(setup_session, Product, "PROD-CARD-001"),
         "product_meta_b": _id_by_code(setup_session, Product, "PROD-META-001"),
+        "product_card_c": _id_by_code(setup_session, Product, "PROD-CARD-002"),
     }
     setup_session.close()
 
@@ -479,7 +483,7 @@ def test_visit_detail_returns_display_data_and_state_actions(
         "PLANNED": ["CHECK_IN"],
         "CHECKED_IN": ["CHECK_OUT"],
         "CHECKED_OUT": ["SUBMIT_REPORT"],
-        "REPORTED": [],
+        "REPORTED": ["UPDATE_REPORT"],
     }
 
     for status_name, workflow_id in ids.items():
@@ -988,3 +992,370 @@ def test_compliance_failure_rolls_back_check_out_and_findings(
         )
         == 0
     )
+
+
+def _checked_out_workflow(
+    context: ApiTestContext,
+    checked_in_at: datetime,
+    *,
+    duration: timedelta = timedelta(minutes=5),
+    check_in_latitude: Decimal = Decimal("31.210460"),
+    check_out_latitude: Decimal = Decimal("31.210460"),
+) -> UUID:
+    workflow_id = _create_plan_at(context, checked_in_at)
+    _check_in_at(
+        context,
+        workflow_id,
+        checked_in_at,
+        latitude=check_in_latitude,
+    )
+    response = _check_out_at(
+        context,
+        workflow_id,
+        checked_in_at + duration,
+        latitude=check_out_latitude,
+    )
+    assert response.status_code == 200
+    return workflow_id
+
+
+def _valid_report_payload(context: ApiTestContext) -> dict[str, Any]:
+    return {
+        "conversationSummary": "  Discussed the latest clinical evidence.  ",
+        "hcpFeedback": "  The doctor requested long-term safety data.  ",
+        "notes": "  Follow up next month.  ",
+        "detailingRecords": [
+            {
+                "productId": str(context.ids["product_card_a"]),
+                "contentSummary": "  Presented guideline recommendations.  ",
+            }
+        ],
+        "materialDistributions": [
+            {
+                "productId": str(context.ids["product_card_a"]),
+                "materialCode": "  LIT-001  ",
+                "materialName": "  Clinical evidence handout  ",
+                "quantity": 0,
+                "isCompliant": True,
+            }
+        ],
+    }
+
+
+def _put_report_at(
+    context: ApiTestContext,
+    workflow_id: UUID,
+    at: datetime,
+    payload: dict[str, Any],
+) -> Any:
+    app.dependency_overrides[get_clock] = lambda: FixedClock(at)
+    return context.client.put(f"/api/visits/{workflow_id}/report", json=payload)
+
+
+def test_submit_report_saves_complete_report_and_changes_status(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 25, 1, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, checked_in_at)
+    submitted_at = checked_in_at + timedelta(minutes=8)
+
+    response = _put_report_at(
+        api_context,
+        workflow_id,
+        submitted_at,
+        _valid_report_payload(api_context),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "REPORTED"
+    assert body["allowedActions"] == ["UPDATE_REPORT"]
+    report = body["report"]
+    assert report["conversationSummary"] == "Discussed the latest clinical evidence."
+    assert report["hcpFeedback"] == "The doctor requested long-term safety data."
+    assert report["notes"] == "Follow up next month."
+    assert report["submittedAt"] == "2026-09-25T01:08:00Z"
+    assert report["detailingRecords"] == [
+        {
+            "productId": str(api_context.ids["product_card_a"]),
+            "contentSummary": "Presented guideline recommendations.",
+        }
+    ]
+    assert report["materialDistributions"][0]["materialCode"] == "LIT-001"
+    assert report["materialDistributions"][0]["materialName"] == "Clinical evidence handout"
+    assert report["materialDistributions"][0]["quantity"] == 0
+
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert api_context.connection_session.get(VisitReport, visit.id) is not None
+    assert (
+        api_context.connection_session.scalar(
+            select(func.count())
+            .select_from(AcademicDetailingRecord)
+            .where(AcademicDetailingRecord.visit_id == visit.id)
+        )
+        == 1
+    )
+
+
+def test_update_report_replaces_all_mutable_report_data(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 25, 2, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, checked_in_at)
+    first = _put_report_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(minutes=8),
+        _valid_report_payload(api_context),
+    )
+    original_created_at = first.json()["report"]["createdAt"]
+    updated_payload = {
+        "conversationSummary": "Updated discussion summary.",
+        "hcpFeedback": "Updated doctor feedback.",
+        "notes": None,
+        "detailingRecords": [
+            {
+                "productId": str(api_context.ids["product_meta_b"]),
+                "contentSummary": "Presented updated metabolic study results.",
+            }
+        ],
+        "materialDistributions": [],
+    }
+
+    updated = _put_report_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(minutes=12),
+        updated_payload,
+    )
+
+    assert updated.status_code == 200
+    report = updated.json()["report"]
+    assert updated.json()["status"] == "REPORTED"
+    assert report["conversationSummary"] == "Updated discussion summary."
+    assert report["notes"] is None
+    assert report["createdAt"] == original_created_at
+    assert report["submittedAt"] == "2026-09-25T02:12:00Z"
+    assert [item["productId"] for item in report["detailingRecords"]] == [
+        str(api_context.ids["product_meta_b"])
+    ]
+    assert report["materialDistributions"] == []
+
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert (
+        api_context.connection_session.scalar(
+            select(func.count())
+            .select_from(AcademicDetailingRecord)
+            .where(AcademicDetailingRecord.visit_id == visit.id)
+        )
+        == 1
+    )
+    assert (
+        api_context.connection_session.scalar(
+            select(func.count())
+            .select_from(MaterialDistribution)
+            .where(MaterialDistribution.visit_id == visit.id)
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize("checked_in", [False, True])
+def test_report_requires_checked_out_visit(api_context: ApiTestContext, checked_in: bool) -> None:
+    at = datetime(2026, 9, 25, 3, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, at)
+    if checked_in:
+        _check_in_at(api_context, workflow_id, at)
+
+    response = _put_report_at(
+        api_context,
+        workflow_id,
+        at + timedelta(minutes=10),
+        _valid_report_payload(api_context),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "VISIT_NOT_CHECKED_OUT"
+    assert api_context.connection_session.scalar(select(func.count()).select_from(VisitReport)) == 0
+
+
+def test_report_rejects_empty_detailing_products(api_context: ApiTestContext) -> None:
+    at = datetime(2026, 9, 25, 4, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, at)
+    payload = _valid_report_payload(api_context)
+    payload["detailingRecords"] = []
+
+    response = _put_report_at(api_context, workflow_id, at + timedelta(minutes=8), payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "DETAILING_RECORDS_REQUIRED"
+
+
+def test_report_rejects_product_outside_plan(api_context: ApiTestContext) -> None:
+    at = datetime(2026, 9, 25, 5, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, at)
+    payload = _valid_report_payload(api_context)
+    payload["detailingRecords"] = [
+        {
+            "productId": str(api_context.ids["product_card_c"]),
+            "contentSummary": "This product was not planned.",
+        }
+    ]
+
+    response = _put_report_at(api_context, workflow_id, at + timedelta(minutes=8), payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "REPORT_PRODUCT_NOT_IN_PLAN"
+    assert api_context.connection_session.scalar(select(func.count()).select_from(VisitReport)) == 0
+
+
+def test_report_rejects_duplicate_detailing_product(api_context: ApiTestContext) -> None:
+    at = datetime(2026, 9, 25, 6, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, at)
+    payload = _valid_report_payload(api_context)
+    payload["detailingRecords"].append(dict(payload["detailingRecords"][0]))
+
+    response = _put_report_at(api_context, workflow_id, at + timedelta(minutes=8), payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "DUPLICATE_DETAILING_PRODUCT"
+
+
+def test_report_rejects_negative_material_quantity(api_context: ApiTestContext) -> None:
+    at = datetime(2026, 9, 25, 7, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, at)
+    payload = _valid_report_payload(api_context)
+    payload["materialDistributions"][0]["quantity"] = -1
+
+    response = _put_report_at(api_context, workflow_id, at + timedelta(minutes=8), payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_MATERIAL_QUANTITY"
+
+
+def test_report_updates_do_not_change_visit_facts_or_compliance_findings(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 25, 8, tzinfo=UTC)
+    far_latitude = _north_of(Decimal("31.210460"), 600)
+    workflow_id = _checked_out_workflow(
+        api_context,
+        checked_in_at,
+        duration=timedelta(seconds=299),
+        check_in_latitude=far_latitude,
+    )
+    session = api_context.connection_session
+    session.expire_all()
+    visit = session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    original_facts = (
+        visit.check_in_at,
+        visit.check_in_latitude,
+        visit.check_in_longitude,
+        visit.check_out_at,
+        visit.check_out_latitude,
+        visit.check_out_longitude,
+        visit.duration_seconds,
+    )
+    original_findings = list(
+        session.execute(
+            select(
+                ComplianceFinding.id,
+                ComplianceFinding.code,
+                ComplianceFinding.measured_value,
+                ComplianceFinding.threshold_value,
+            )
+            .where(ComplianceFinding.visit_id == visit.id)
+            .order_by(ComplianceFinding.code)
+        ).all()
+    )
+    assert len(original_findings) == 2
+
+    first_payload = _valid_report_payload(api_context)
+    assert (
+        _put_report_at(
+            api_context,
+            workflow_id,
+            checked_in_at + timedelta(minutes=8),
+            first_payload,
+        ).status_code
+        == 200
+    )
+    first_payload["conversationSummary"] = "Corrected summary."
+    assert (
+        _put_report_at(
+            api_context,
+            workflow_id,
+            checked_in_at + timedelta(minutes=9),
+            first_payload,
+        ).status_code
+        == 200
+    )
+
+    session.expire_all()
+    current_visit = session.get(Visit, visit.id)
+    assert current_visit is not None
+    assert (
+        current_visit.check_in_at,
+        current_visit.check_in_latitude,
+        current_visit.check_in_longitude,
+        current_visit.check_out_at,
+        current_visit.check_out_latitude,
+        current_visit.check_out_longitude,
+        current_visit.duration_seconds,
+    ) == original_facts
+    assert (
+        list(
+            session.execute(
+                select(
+                    ComplianceFinding.id,
+                    ComplianceFinding.code,
+                    ComplianceFinding.measured_value,
+                    ComplianceFinding.threshold_value,
+                )
+                .where(ComplianceFinding.visit_id == visit.id)
+                .order_by(ComplianceFinding.code)
+            ).all()
+        )
+        == original_findings
+    )
+
+
+def test_report_replacement_failure_rolls_back_original_report(
+    api_context: ApiTestContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checked_in_at = datetime(2026, 9, 25, 9, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, checked_in_at)
+    original_payload = _valid_report_payload(api_context)
+    initial = _put_report_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(minutes=8),
+        original_payload,
+    )
+    assert initial.status_code == 200
+    original_report = initial.json()["report"]
+    original_replace = VisitPlanRepository.replace_report
+
+    def fail_after_write(self: VisitPlanRepository, **kwargs: Any) -> None:
+        original_replace(self, **kwargs)
+        raise RuntimeError("simulated report persistence failure")
+
+    monkeypatch.setattr(VisitPlanRepository, "replace_report", fail_after_write)
+    changed_payload = _valid_report_payload(api_context)
+    changed_payload["conversationSummary"] = "This change must be rolled back."
+
+    with pytest.raises(RuntimeError, match="simulated report persistence failure"):
+        _put_report_at(
+            api_context,
+            workflow_id,
+            checked_in_at + timedelta(minutes=12),
+            changed_payload,
+        )
+
+    api_context.connection_session.expire_all()
+    current = api_context.client.get(f"/api/visits/{workflow_id}")
+    assert current.status_code == 200
+    assert current.json()["report"] == original_report

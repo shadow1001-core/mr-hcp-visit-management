@@ -357,6 +357,7 @@ class VisitReport(CreatedAtMixin, Base):
     )
     conversation_summary: Mapped[str] = mapped_column(Text, nullable=False)
     hcp_feedback: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     visit: Mapped[Visit] = relationship(back_populates="report")
@@ -408,7 +409,7 @@ class MaterialDistribution(CreatedAtMixin, Base):
         ),
         CheckConstraint("btrim(material_code) <> ''", name="material_code_not_blank"),
         CheckConstraint("btrim(material_name) <> ''", name="material_name_not_blank"),
-        CheckConstraint("quantity > 0", name="quantity_positive"),
+        CheckConstraint("quantity >= 0", name="quantity_nonnegative"),
         Index("idx_material_distributions_visit_id", "visit_id"),
         Index(
             "idx_material_distributions_product_id",

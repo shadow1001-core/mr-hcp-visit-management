@@ -11,9 +11,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.domain.errors import BusinessError
 
 VALIDATION_CODE_BY_TYPE = {
+    "detailing_records_required": "DETAILING_RECORDS_REQUIRED",
+    "duplicate_detailing_product": "DUPLICATE_DETAILING_PRODUCT",
     "duplicate_product_id": "DUPLICATE_PRODUCT_ID",
     "extra_forbidden": "UNEXPECTED_FIELD",
     "finite_number": "INVALID_COORDINATES",
+    "invalid_material_quantity": "INVALID_MATERIAL_QUANTITY",
     "invalid_coordinates": "INVALID_COORDINATES",
     "products_required": "PRODUCTS_REQUIRED",
     "timezone_required": "TIMEZONE_REQUIRED",

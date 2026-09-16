@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,16 @@ class Settings(BaseSettings):
         if not value.startswith(("postgresql://", "postgresql+psycopg://")):
             msg = "DATABASE_URL must use PostgreSQL"
             raise ValueError(msg)
+        return value
+
+    @field_validator("business_timezone")
+    @classmethod
+    def validate_business_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            msg = "BUSINESS_TIMEZONE must be a valid IANA timezone"
+            raise ValueError(msg) from exc
         return value
 
 

@@ -114,6 +114,7 @@ erDiagram
         uuid visit_id PK,FK
         text conversation_summary
         text hcp_feedback
+        text notes
         timestamptz submitted_at
     }
     ACADEMIC_DETAILING_RECORDS {
@@ -125,6 +126,7 @@ erDiagram
         uuid id PK
         uuid visit_id FK
         uuid product_id FK
+        varchar material_code
         varchar material_name
         integer quantity
         boolean is_compliant
@@ -187,7 +189,7 @@ ER 图中的“至少一个计划产品”“签到时至少一个实际产品�
 - 计划产品和实际产品保存产品代码、名称快照。
 - 实际拜访保存签到时使用的医院坐标快照；签到和签退使用同一快照计算距离。
 - 合规异常保存结构化代码、阶段、测量值、规则阈值、单位和发现时间。
-- 签到事实创建后不可修改；`visits` 只允许一次受条件保护的签退填充。实际产品、报告和异常创建后不提供修改或删除操作。
+- 签到事实创建后不可修改；`visits` 只允许一次受条件保护的签退填充。实际产品和异常创建后不提供修改或删除操作。报告允许整体替换当前内容，但不会修改现场事实或异常。
 - 主数据使用 `is_active` 停用，外键使用 `ON DELETE RESTRICT`，历史不会因主数据删除而级联丢失。
 
 ## 4. 通用字段约定
@@ -466,14 +468,16 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 
 ### 5.12 `visit_reports`
 
-职责：保存签退后首次提交的完整拜访报告。`visit_id` 同时作为主键和外键，保证一对一。
+职责：保存签退后提交的当前完整拜访报告。`visit_id` 同时作为主键和外键，保证一对一；
+`CHECKED_OUT` 首次创建，`REPORTED` 时允许整体替换内容。
 
 | 字段 | 类型 | 可空 | 说明 |
 | --- | --- | --- | --- |
 | `visit_id` | `UUID` | 否 | 主键；外键到 `visits.id` |
 | `conversation_summary` | `TEXT` | 否 | 谈话要点 |
 | `hcp_feedback` | `TEXT` | 否 | 医生反馈；无反馈时提交明确文本 |
-| `submitted_at` | `TIMESTAMPTZ` | 否 | 服务端 UTC Clock 生成 |
+| `notes` | `TEXT` | 是 | 报告级可选备注 |
+| `submitted_at` | `TIMESTAMPTZ` | 否 | 最近一次创建或整体替换时由服务端 UTC Clock 生成 |
 | `created_at` | `TIMESTAMPTZ` | 否 | 默认 `CURRENT_TIMESTAMP` |
 
 约束：
@@ -481,9 +485,10 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 - `PRIMARY KEY (visit_id)`。
 - `FOREIGN KEY (visit_id) REFERENCES visits(id) ON DELETE RESTRICT`。
 - 谈话要点和医生反馈非空白 CHECK。
-- 报告提交后在 MVP 中不可修改或删除。
+- API 不提供删除；更新以 PUT 整体替换业务字段及全部子项，`created_at` 保留首次创建时间。
 
-数据库外键不能判断 `visits.check_out_at` 是否非空；只有 `CHECKED_OUT` 才能提交报告的规则由报告 Service 在锁定计划后校验。
+数据库外键不能判断 `visits.check_out_at` 是否非空；首次提交必须为 `CHECKED_OUT`、更新必须为
+`REPORTED` 的规则由报告 Service 在锁定计划后校验。
 
 ### 5.13 `academic_detailing_records`
 
@@ -503,7 +508,8 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 - `FOREIGN KEY (visit_id, product_id) REFERENCES visit_products(visit_id, product_id) ON DELETE RESTRICT`。
 - `CHECK (btrim(content_summary) <> '')`。
 
-完整报告必须为每个 `visit_products` 项提交一条学术沟通记录。该集合相等约束由首次报告提交 Service 在同一事务中保证。
+完整报告至少包含一条学术沟通记录，且产品集合必须是计划目标产品的非空、不重复子集。
+非空与子集规则由 Service 保证，复合主键兜底防止同一产品重复。
 
 ### 5.14 `material_distributions`
 
@@ -516,7 +522,7 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 | `product_id` | `UUID` | 是 | 关联实际拜访产品；通用资料可为空 |
 | `material_code` | `VARCHAR(100)` | 否 | 资料或合规编号 |
 | `material_name` | `VARCHAR(200)` | 否 | 资料名称 |
-| `quantity` | `INTEGER` | 否 | 默认 `1` |
+| `quantity` | `INTEGER` | 否 | 非负整数，默认 `1` |
 | `is_compliant` | `BOOLEAN` | 否 | 是否为合规资料 |
 | `created_at` | `TIMESTAMPTZ` | 否 | 默认 `CURRENT_TIMESTAMP` |
 
@@ -525,7 +531,7 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 - `PRIMARY KEY (id)`。
 - `FOREIGN KEY (visit_id) REFERENCES visit_reports(visit_id) ON DELETE RESTRICT`。
 - `(visit_id, product_id)` 外键到 `visit_products`，使用默认 `MATCH SIMPLE`；`product_id` 为空时表示通用资料。
-- `CHECK (quantity > 0)`；资料代码和名称非空白 CHECK。
+- `CHECK (quantity >= 0)`；资料代码和名称非空白 CHECK。
 - `idx_material_distributions_visit_id (visit_id)`。
 - `idx_material_distributions_product_id (product_id) WHERE product_id IS NOT NULL`。
 
@@ -570,8 +576,9 @@ PostgreSQL 的普通 CHECK 不能引用其他表，因此数据库不能完整�
 - 创建计划时至少有一条 `visit_plan_products`。
 - 签到前不存在 `visits`；签到事务创建一条 `visits` 并复制全部计划产品。
 - 签退前 `visits.check_out_at IS NULL`。
-- 报告提交前 `check_out_at IS NOT NULL` 且不存在 `visit_reports`。
-- 报告提交时学术沟通产品集合与实际产品集合一致。
+- 报告首次提交前 `check_out_at IS NOT NULL` 且不存在 `visit_reports`；已有报告时允许整体替换。
+- 报告提交或更新时，学术沟通产品是计划目标产品的非空、不重复子集。
+- 更新时显式删除并重建沟通和资料子项，但不得修改 `visits` 或 `compliance_findings`。
 - 签到和签退距离来自统一 Haversine 领域算法。
 - 现场时间只来自服务端 UTC Clock。
 
@@ -606,7 +613,8 @@ PostgreSQL 的普通 CHECK 不能引用其他表，因此数据库不能完整�
 6. 检查更新行数必须为 1，否则返回重复签退业务错误；
 7. 提交。
 
-带条件更新可以防止后续请求覆盖首次签退数据。应用运行角色不应获得修改签到列、实际产品、报告或异常记录的通用权限。
+带条件更新可以防止后续请求覆盖首次签退数据。应用运行角色不应获得修改签到列、实际产品或
+异常记录的通用权限；报告更新只能经由受控的 Service 事务整体替换。
 
 ## 8. 月度产品统计
 
@@ -648,7 +656,7 @@ MVP 不需要物化视图、缓存或分析数据库。
 - 所有时间字段均使用 `TIMESTAMPTZ`，不存在无时区业务时间列。
 - 数据库连接会话统一设置为 UTC。
 - API 拒绝不带时区信息的计划时间，并在写入前转换为 UTC。
-- 签到、签退、报告提交和异常发现时间来自服务端 UTC Clock。
+- 签到、签退、报告提交或更新以及异常发现时间来自服务端 UTC Clock。
 - 月份边界由应用按配置的 IANA 业务时区计算，再作为 UTC 参数传给 SQL。
 - 前端只负责按业务时区显示，不决定统计月份。
 - 数据库不保存冗余月份字段。
@@ -663,7 +671,8 @@ MVP 不采用通用 `deleted_at` 软删除：
 | 医院科室、医生执业关系 | 使用 `is_active = FALSE` 停用 |
 | 计划和计划产品 | 创建后不可删除 |
 | 实际拜访 | 仅允许首次签退时条件更新；此后不提供更新或删除操作 |
-| 实际产品、报告、沟通、资料和异常 | 创建后不提供更新或删除操作 |
+| 实际产品和异常 | 创建后不提供更新或删除操作 |
+| 报告、沟通和资料 | 不提供删除 API；允许事务内整体替换当前报告及子项 |
 
 所有历史相关外键使用 `ON DELETE RESTRICT` 或等价的 `NO ACTION`，不使用 `CASCADE`。即使主数据停用，历史外键和快照仍然保留。
 

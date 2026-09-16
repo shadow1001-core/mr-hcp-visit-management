@@ -12,6 +12,9 @@ from app.application.services.visit_plans import (
     CheckInCommand,
     CheckOutCommand,
     ComplianceEvaluator,
+    DetailingRecordInput,
+    MaterialDistributionInput,
+    UpsertVisitReportCommand,
     VisitPlanService,
     allowed_actions,
     workflow_status,
@@ -23,10 +26,14 @@ from app.schemas.visit_plan import (
     CheckInRequest,
     CheckOutRequest,
     ComplianceFindingView,
+    DetailingRecordView,
     ExecutionSummaryView,
+    MaterialDistributionView,
     PaginatedVisitWorkflows,
     ReferenceView,
+    UpsertVisitReportRequest,
     VisitMomentView,
+    VisitReportView,
     VisitStatus,
     VisitWorkflowDetail,
     VisitWorkflowSummary,
@@ -125,6 +132,41 @@ def check_out_visit(
     return _detail_response(plan)
 
 
+@router.put("/{workflow_id}/report", response_model=VisitWorkflowDetail)
+def upsert_visit_report(
+    workflow_id: UUID,
+    request: UpsertVisitReportRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+) -> VisitWorkflowDetail:
+    plan = VisitPlanService(session, clock=clock).upsert_report(
+        UpsertVisitReportCommand(
+            workflow_id=workflow_id,
+            conversation_summary=request.conversationSummary,
+            hcp_feedback=request.hcpFeedback,
+            notes=request.notes,
+            detailing_records=[
+                DetailingRecordInput(
+                    product_id=item.productId,
+                    content_summary=item.contentSummary,
+                )
+                for item in request.detailingRecords
+            ],
+            material_distributions=[
+                MaterialDistributionInput(
+                    product_id=item.productId,
+                    material_code=item.materialCode,
+                    material_name=item.materialName,
+                    quantity=item.quantity,
+                    is_compliant=item.isCompliant,
+                )
+                for item in request.materialDistributions
+            ],
+        )
+    )
+    return _detail_response(plan)
+
+
 def _detail_response(plan: VisitPlan) -> VisitWorkflowDetail:
     status = cast(VisitStatus, workflow_status(plan))
     return VisitWorkflowDetail(
@@ -134,7 +176,8 @@ def _detail_response(plan: VisitPlan) -> VisitWorkflowDetail:
         actual_visit=_actual_visit(plan.visit) if plan.visit is not None else None,
         report=_report(plan.visit) if status == "REPORTED" and plan.visit is not None else None,
         allowed_actions=cast(
-            list[Literal["CHECK_IN", "CHECK_OUT", "SUBMIT_REPORT"]], allowed_actions(plan)
+            list[Literal["CHECK_IN", "CHECK_OUT", "SUBMIT_REPORT", "UPDATE_REPORT"]],
+            allowed_actions(plan),
         ),
     )
 
@@ -220,28 +263,32 @@ def _finding_message(code: str) -> str:
     return FINDING_MESSAGES[FindingCode(str(code))]
 
 
-def _report(visit: Visit) -> dict[str, object] | None:
+def _report(visit: Visit) -> VisitReportView | None:
     report = visit.report
     if report is None:
         return None
-    return {
-        "conversationSummary": report.conversation_summary,
-        "hcpFeedback": report.hcp_feedback,
-        "detailingRecords": [
-            {"productId": str(item.product_id), "contentSummary": item.content_summary}
-            for item in report.detailing_records
+    return VisitReportView(
+        conversation_summary=report.conversation_summary,
+        hcp_feedback=report.hcp_feedback,
+        notes=report.notes,
+        detailing_records=[
+            DetailingRecordView(
+                product_id=item.product_id,
+                content_summary=item.content_summary,
+            )
+            for item in sorted(report.detailing_records, key=lambda value: str(value.product_id))
         ],
-        "materialDistributions": [
-            {
-                "id": str(item.id),
-                "productId": str(item.product_id) if item.product_id else None,
-                "materialCode": item.material_code,
-                "materialName": item.material_name,
-                "quantity": item.quantity,
-                "isCompliant": item.is_compliant,
-            }
-            for item in report.material_distributions
+        material_distributions=[
+            MaterialDistributionView(
+                id=item.id,
+                product_id=item.product_id,
+                material_code=item.material_code,
+                material_name=item.material_name,
+                quantity=item.quantity,
+                is_compliant=item.is_compliant,
+            )
+            for item in sorted(report.material_distributions, key=lambda value: str(value.id))
         ],
-        "submittedAt": report.submitted_at,
-        "createdAt": report.created_at,
-    }
+        submitted_at=report.submitted_at,
+        created_at=report.created_at,
+    )
