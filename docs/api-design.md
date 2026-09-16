@@ -179,7 +179,9 @@ HTTP 状态区分：
 ```json
 {
   "mrId": "75a75d6a-b562-493b-bc87-41a39234d040",
-  "hcpPracticeId": "c52a02ca-b179-4742-a3f7-29699814adf2",
+  "hcpId": "b989df77-d693-45f9-97d0-bce457f5b66a",
+  "hospitalId": "3b881a35-e514-4a24-ae3f-45eddf2a1948",
+  "departmentId": "0912d04c-12e6-4a8d-b5e9-2055959392bd",
   "plannedAt": "2026-09-21T09:30:00+08:00",
   "productIds": [
     "f84b5ef1-3459-4ee2-aeaf-ce1316363094",
@@ -188,29 +190,39 @@ HTTP 状态区分：
 }
 ```
 
-| 字段            | 必填 | 规则                                          |
-| --------------- | ---- | --------------------------------------------- |
-| `mrId`          | 是   | 存在且启用的 MR UUID                          |
-| `hcpPracticeId` | 是   | 存在且启用，且链上的 HCP、医院、科室均启用    |
-| `plannedAt`     | 是   | 带时区 RFC 3339 时间                          |
-| `productIds`    | 是   | 至少 1 个；每个产品存在且启用；请求内不可重复 |
+| 字段           | 必填 | 规则                                          |
+| -------------- | ---- | --------------------------------------------- |
+| `mrId`         | 是   | 存在且启用的 MR UUID                          |
+| `hcpId`        | 是   | 存在且启用的 HCP UUID                         |
+| `hospitalId`   | 是   | 存在且启用的医院 UUID                         |
+| `departmentId` | 是   | 存在且启用的标准科室 UUID                     |
+| `plannedAt`    | 是   | 带时区 RFC 3339 时间                          |
+| `productIds`   | 是   | 至少 1 个；每个产品存在且启用；请求内不可重复 |
+
+Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practices`：指定医院必须开设指定科室，
+且指定 HCP 必须在该医院科室执业。客户端不直接提交内部 `hcpPracticeId`。
 
 成功：`201 Created`，响应为 `VisitPlanView`；`Location` 为 `/api/visits/{id}`。
 
 错误：
 
-| 状态  | code                   | 场景                                              |
-| ----- | ---------------------- | ------------------------------------------------- |
-| `404` | `REFERENCE_NOT_FOUND`  | MR、执业关系或产品不存在；`details` 指明字段和 ID |
-| `422` | `REFERENCE_INACTIVE`   | 任一引用或执业关系链已停用                        |
-| `422` | `PRODUCTS_REQUIRED`    | `productIds` 为空                                 |
-| `422` | `DUPLICATE_PRODUCT_ID` | `productIds` 中存在重复值                         |
-| `422` | `TIMEZONE_REQUIRED`    | `plannedAt` 不带时区                              |
-| `422` | `VALIDATION_ERROR`     | UUID、时间或请求结构无效                          |
+| 状态  | code                    | 场景                                     |
+| ----- | ----------------------- | ---------------------------------------- |
+| `404` | `MR_NOT_FOUND`          | MR 不存在                                |
+| `404` | `HCP_NOT_FOUND`         | HCP 不存在                               |
+| `404` | `HOSPITAL_NOT_FOUND`    | 医院不存在                               |
+| `404` | `DEPARTMENT_NOT_FOUND`  | 科室不存在                               |
+| `404` | `PRODUCT_NOT_FOUND`     | 一个或多个产品不存在                     |
+| `422` | `REFERENCE_INACTIVE`    | 任一主数据已停用                         |
+| `422` | `HCP_PRACTICE_MISMATCH` | 医院科室关系或 HCP 执业关系不存在/已停用 |
+| `422` | `PRODUCTS_REQUIRED`     | `productIds` 为空                        |
+| `422` | `DUPLICATE_PRODUCT_ID`  | `productIds` 中存在重复值                |
+| `422` | `TIMEZONE_REQUIRED`     | `plannedAt` 不带时区                     |
+| `422` | `VALIDATION_ERROR`      | UUID、时间或请求结构无效                 |
 
 重复/幂等：本接口不是幂等接口；两个相同请求会创建两个不同计划。MVP 不支持幂等键。
 
-允许客户端提交的字段只有上表四项。禁止提交 `id`、`status`、`createdAt`、快照名称/代码、
+允许客户端提交的字段只有上表六项。禁止提交 `hcpPracticeId`、`id`、`status`、`createdAt`、快照名称/代码、
 签到/签退字段、距离、时长、异常和报告字段。
 
 ## 5. 查询拜访计划
@@ -225,8 +237,9 @@ HTTP 状态区分：
 | --------------------------- | ---------------------------------------------------------- |
 | `status`                    | 可重复；`PLANNED`、`CHECKED_IN`、`CHECKED_OUT`、`REPORTED` |
 | `mrId`                      | MR UUID                                                    |
-| `hcpPracticeId`             | 执业关系 UUID                                              |
+| `hcpId`                     | HCP UUID，通过计划保存的执业关系筛选                       |
 | `hospitalId`                | 医院 UUID，通过执业关系筛选                                |
+| `departmentId`              | 标准科室 UUID，通过执业关系筛选                            |
 | `productId`                 | 计划目标产品 UUID                                          |
 | `plannedFrom` / `plannedTo` | 带时区 RFC 3339 半开区间 `[from, to)`；可单独使用          |
 | `sort`                      | `plannedAt` 或 `createdAt`，默认 `plannedAt`               |
@@ -269,7 +282,8 @@ HTTP 状态区分：
 | `status`                                                   | 可重复；四种生命周期状态                                                                                           |
 | `mrId`、`hcpId`、`hospitalId`、`departmentId`、`productId` | UUID 精确筛选                                                                                                      |
 | `isAbnormal`                                               | `true`/`false`；使用该筛选会排除 `PLANNED`；`false` 只表示实际拜访当前无已发现异常，不代表未签退拜访已完成合规校验 |
-| `checkInFrom` / `checkInTo`                                | 带时区 RFC 3339 半开区间；使用任一签到时间筛选时自动排除 `PLANNED`                                                 |
+| `plannedFrom` / `plannedTo`                                | 计划时间的带时区 RFC 3339 半开区间 `[from, to)`；可单独使用                                                        |
+| `checkInFrom` / `checkInTo`                                | 签到时间的带时区 RFC 3339 半开区间 `[from, to)`；使用任一签到时间筛选时自动排除 `PLANNED`                          |
 | `sort`                                                     | `plannedAt`、`checkInAt` 或 `createdAt`；默认 `plannedAt`                                                          |
 | `order`                                                    | `asc` 或 `desc`；默认 `desc`；空签到时间排在最后                                                                   |
 | `page` / `pageSize`                                        | 见通用分页                                                                                                         |
@@ -281,17 +295,21 @@ HTTP 状态区分：
 
 返回完整工作流详情，顶层字段如下：
 
-| 字段          | 类型            | 含义                      |
-| ------------- | --------------- | ------------------------- |
-| `id`          | UUID            | 工作流 ID                 |
-| `status`      | enum            | 当前派生状态              |
-| `plan`        | `VisitPlanView` | 计划及历史快照            |
-| `actualVisit` | object/null     | 签到后存在，结构见 3.4 节 |
-| `report`      | object/null     | `REPORTED` 时存在         |
+| 字段             | 类型            | 含义                      |
+| ---------------- | --------------- | ------------------------- |
+| `id`             | UUID            | 工作流 ID                 |
+| `status`         | enum            | 当前派生状态              |
+| `plan`           | `VisitPlanView` | 计划及历史快照            |
+| `actualVisit`    | object/null     | 签到后存在，结构见 3.4 节 |
+| `report`         | object/null     | `REPORTED` 时存在         |
+| `allowedActions` | string[]        | 当前状态允许的下一步操作  |
 
 `report` 包含 `conversationSummary`、`hcpFeedback`、`detailingRecords`、
 `materialDistributions`、服务端 `submittedAt` 和 `createdAt`。两类子项字段与第 9 节的允许输入相同；
 资料项额外返回服务端生成的 `id`。`report` 在 `REPORTED` 前为 `null`。
+
+`allowedActions` 与状态机严格对应：`PLANNED` 为 `["CHECK_IN"]`，`CHECKED_IN` 为
+`["CHECK_OUT"]`，`CHECKED_OUT` 为 `["SUBMIT_REPORT"]`，`REPORTED` 为空数组。
 
 成功：`200 OK`。
 
@@ -317,20 +335,24 @@ HTTP 状态区分：
 }
 ```
 
-成功事务会创建实际拜访、复制计划产品快照、用服务端 UTC Clock 生成签到时间、计算
-Haversine 距离并保存签到异常。成功返回 `200 OK` 和完整工作流详情。
+成功事务会锁定计划行，创建实际拜访、复制全部计划产品快照、用服务端 UTC Clock 生成签到时间，
+并计算和保存可信的 Haversine 距离。成功返回 `200 OK` 和完整工作流详情。本轮签到接口只记录
+距离事实，不执行 500 米阈值判断，也不创建 `compliance_findings`；合规异常将在后续合规切片实现。
 
 错误：
 
-| 状态  | code                       | 场景                                             |
-| ----- | -------------------------- | ------------------------------------------------ |
-| `404` | `VISIT_WORKFLOW_NOT_FOUND` | 工作流不存在                                     |
-| `409` | `VISIT_ALREADY_CHECKED_IN` | 当前为 `CHECKED_IN`、`CHECKED_OUT` 或 `REPORTED` |
-| `422` | `INVALID_COORDINATES`      | 纬度或经度超出范围或不是有限数值                 |
-| `422` | `VALIDATION_ERROR`         | 请求缺字段、类型错误或路径 ID 非法               |
+| 状态  | code                       | 场景                                    |
+| ----- | -------------------------- | --------------------------------------- |
+| `404` | `VISIT_NOT_FOUND`          | 工作流不存在                            |
+| `409` | `VISIT_ALREADY_CHECKED_IN` | 当前为 `CHECKED_IN`；重复或并发落后请求 |
+| `409` | `INVALID_VISIT_STATE`      | 当前为 `CHECKED_OUT` 或 `REPORTED`      |
+| `422` | `INVALID_COORDINATES`      | 纬度或经度超出范围或不是有限数值        |
+| `422` | `UNEXPECTED_FIELD`         | 请求包含坐标以外的字段                  |
+| `422` | `VALIDATION_ERROR`         | 请求缺字段、类型错误或路径 ID 非法      |
 
-重复/并发：接口不是“重复成功”式幂等。第一次成功后，所有重复或并发落后请求稳定返回
-`409 VISIT_ALREADY_CHECKED_IN`，且绝不覆盖首次时间、坐标、距离、实际产品快照或异常。
+重复/并发：接口不是“重复成功”式幂等。第一次成功后，仍处于 `CHECKED_IN` 的重复或并发落后请求
+稳定返回 `409 VISIT_ALREADY_CHECKED_IN`；已经签退或报告完成后再次签到返回
+`409 INVALID_VISIT_STATE`。任何失败请求都不覆盖首次时间、坐标、距离或实际产品快照。
 
 客户端禁止提交 `checkInAt`、医院坐标快照、`distanceMeters`、`status`、`durationSeconds`、
 `complianceStatus`、`complianceFindings` 或任何签退/报告字段；出现这些字段返回
@@ -501,13 +523,13 @@ Haversine 距离并保存签到异常。成功返回 `200 OK` 和完整工作流
 
 ## 11. 客户端字段权限汇总
 
-| 操作      | 允许客户端提交                                     | 明确禁止客户端提交                                 |
-| --------- | -------------------------------------------------- | -------------------------------------------------- |
-| 创建计划  | `mrId`、`hcpPracticeId`、`plannedAt`、`productIds` | ID、状态、快照、审计时间、实际拜访数据             |
-| 签到      | `latitude`、`longitude`                            | 签到时间、医院坐标快照、距离、状态、实际产品、异常 |
-| 签退      | `latitude`、`longitude`                            | 签退时间、距离、时长、状态、异常和阈值             |
-| 提交报告  | 摘要、反馈、沟通记录、资料派发明细                 | 提交时间、状态、签到/签退事实、时长、距离、异常    |
-| 查询/看板 | 文档列出的路径和查询参数                           | 请求体、业务时区覆盖、客户端统计结果               |
+| 操作      | 允许客户端提交                                                           | 明确禁止客户端提交                                      |
+| --------- | ------------------------------------------------------------------------ | ------------------------------------------------------- |
+| 创建计划  | `mrId`、`hcpId`、`hospitalId`、`departmentId`、`plannedAt`、`productIds` | `hcpPracticeId`、ID、状态、快照、审计时间、实际拜访数据 |
+| 签到      | `latitude`、`longitude`                                                  | 签到时间、医院坐标快照、距离、状态、实际产品、异常      |
+| 签退      | `latitude`、`longitude`                                                  | 签退时间、距离、时长、状态、异常和阈值                  |
+| 提交报告  | 摘要、反馈、沟通记录、资料派发明细                                       | 提交时间、状态、签到/签退事实、时长、距离、异常         |
+| 查询/看板 | 文档列出的路径和查询参数                                                 | 请求体、业务时区覆盖、客户端统计结果                    |
 
 服务端时间、距离、时长、生命周期状态、合规结论和异常记录始终是服务端可信数据。前端可以输入
 模拟 GPS 坐标和业务内容，但不能决定或覆盖任何派生字段。
@@ -522,12 +544,20 @@ Haversine 距离并保存签到异常。成功返回 `200 OK` 和完整工作流
 | `INVALID_TIME_RANGE`             | `422` | 起止时间范围非法                 |
 | `INVALID_MONTH`                  | `422` | 月份格式或值非法                 |
 | `INVALID_COORDINATES`            | `422` | 经纬度非法                       |
-| `REFERENCE_NOT_FOUND`            | `404` | 引用主数据不存在                 |
-| `REFERENCE_INACTIVE`             | `422` | 引用主数据或关系已停用           |
+| `MR_NOT_FOUND`                   | `404` | 医药代表不存在                   |
+| `HCP_NOT_FOUND`                  | `404` | 医生不存在                       |
+| `HOSPITAL_NOT_FOUND`             | `404` | 医院不存在                       |
+| `DEPARTMENT_NOT_FOUND`           | `404` | 科室不存在                       |
+| `PRODUCT_NOT_FOUND`              | `404` | 产品不存在                       |
+| `REFERENCE_NOT_FOUND`            | `404` | 其他接口引用的主数据不存在       |
+| `REFERENCE_INACTIVE`             | `422` | 引用主数据已停用                 |
+| `HCP_PRACTICE_MISMATCH`          | `422` | 医院科室或医生执业关系无效       |
 | `PRODUCTS_REQUIRED`              | `422` | 创建计划没有产品                 |
 | `DUPLICATE_PRODUCT_ID`           | `422` | 创建计划的产品重复               |
 | `VISIT_WORKFLOW_NOT_FOUND`       | `404` | 拜访工作流不存在                 |
+| `VISIT_NOT_FOUND`                | `404` | 签到目标工作流不存在             |
 | `VISIT_ALREADY_CHECKED_IN`       | `409` | 重复签到                         |
+| `INVALID_VISIT_STATE`            | `409` | 当前状态不允许请求的生命周期操作 |
 | `VISIT_NOT_CHECKED_IN`           | `409` | 尚未签到却请求签退               |
 | `VISIT_ALREADY_CHECKED_OUT`      | `409` | 重复签退                         |
 | `VISIT_NOT_CHECKED_OUT`          | `409` | 尚未签退却提交报告               |
@@ -542,7 +572,7 @@ Haversine 距离并保存签到异常。成功返回 `200 OK` 和完整工作流
 ## 13. 事务与并发契约
 
 - 创建计划及全部目标产品必须在一个事务完成。
-- 签到锁定计划行；实际拜访创建、产品快照和签到异常在同一事务完成。
+- 签到锁定计划行；实际拜访创建、医院坐标快照、距离结果和产品快照在同一事务完成。本轮不创建签到异常。
 - 签退使用行锁或条件更新，签退事实和新增异常在同一事务完成。
 - 报告、沟通记录和资料派发在一个事务完成；任何子项失败都不产生部分报告。
 - 并发状态冲突使用与顺序重复操作相同的稳定 `409` 错误码。
