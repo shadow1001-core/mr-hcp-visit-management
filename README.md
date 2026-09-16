@@ -38,6 +38,23 @@ uv run --locked --no-sync uvicorn app.main:app --reload
 
 The API is available at `http://localhost:8000`, with health at `GET /health` and OpenAPI docs at `/docs`.
 
+### Local demo data
+
+After configuring `DATABASE_URL`, apply migrations and explicitly load the deterministic demo data:
+
+```bash
+cd backend
+uv run --locked --no-sync alembic upgrade head
+cd ..
+make backend-seed
+```
+
+The seed contains one MR, two hospitals with coordinates, three HCPs and three products,
+plus their department and practice relationships. It never creates visit plans, visits,
+reports, material distributions, or compliance findings. The command is idempotent and may
+be run repeatedly. It is not part of application startup and refuses to run when
+`APP_ENV=production`.
+
 ## Frontend
 
 ```bash

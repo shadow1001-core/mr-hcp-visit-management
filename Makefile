@@ -1,4 +1,4 @@
-.PHONY: backend-sync backend-format backend-lint backend-typecheck backend-test backend-check \
+.PHONY: backend-sync backend-seed backend-format backend-lint backend-typecheck backend-test backend-check \
 	frontend-format frontend-lint frontend-typecheck frontend-build frontend-check check
 
 UV_CACHE_DIR ?= $(CURDIR)/work/uv-cache
@@ -8,13 +8,16 @@ export UV_CACHE_DIR UV_PYTHON_INSTALL_DIR
 backend-sync:
 	cd backend && uv sync --group dev --locked
 
+backend-seed:
+	cd backend && uv run --locked --no-sync python -m app.db.seed
+
 backend-format:
-	cd backend && uv run --locked --no-sync ruff format app tests
-	cd backend && uv run --locked --no-sync ruff check --fix app tests
+	cd backend && uv run --locked --no-sync ruff format alembic app tests
+	cd backend && uv run --locked --no-sync ruff check --fix alembic app tests
 
 backend-lint:
-	cd backend && uv run --locked --no-sync ruff format --check app tests
-	cd backend && uv run --locked --no-sync ruff check app tests
+	cd backend && uv run --locked --no-sync ruff format --check alembic app tests
+	cd backend && uv run --locked --no-sync ruff check alembic app tests
 
 backend-typecheck:
 	cd backend && uv run --locked --no-sync mypy app
