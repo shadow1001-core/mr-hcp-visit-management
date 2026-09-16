@@ -429,10 +429,12 @@ ER 图中的“至少一个计划产品”“签到时至少一个实际产品�
 - `CHECK (check_in_distance_meters >= 0)`。
 - `CHECK (check_out_distance_meters IS NULL OR check_out_distance_meters >= 0)`。
 - 签退时间、签退坐标和签退距离必须同时为空或同时非空。
-- 签退存在时，`CHECK (check_out_at >= check_in_at)`。
 - `duration_seconds` 定义为存储生成列：签退为空时为 `NULL`，否则为 `EXTRACT(EPOCH FROM (check_out_at - check_in_at))`。
-- `CHECK (duration_seconds IS NULL OR duration_seconds >= 0)`。
 - `CHECK (updated_at >= created_at)`。
+
+不对 `check_out_at >= check_in_at` 或生成的 `duration_seconds >= 0` 建 CHECK。这样可以保留服务端
+时钟回拨等情况下采集到的原始事实，并由合规算法生成 `INVALID_TIME_SEQUENCE`。客户端仍然不能
+提交时间或时长，正常状态转换及一次性写入由 Service 层保证。
 
 索引：
 
@@ -545,16 +547,18 @@ API 请求模型不得出现距离、`check_in_at`、`check_out_at` 或 `duratio
 
 允许的代码和约束：
 
-- `CHECK_IN_LOCATION_OUT_OF_RANGE`：`phase = 'CHECK_IN'`、`unit = 'METERS'`、`threshold_value = 500`、`measured_value > threshold_value`。
-- `CHECK_OUT_LOCATION_OUT_OF_RANGE`：`phase = 'CHECK_OUT'`、`unit = 'METERS'`、`threshold_value = 500`、`measured_value > threshold_value`。
-- `DURATION_TOO_SHORT`：`phase = 'CHECK_OUT'`、`unit = 'SECONDS'`、`threshold_value = 300`、`measured_value < threshold_value`。
+- `CHECKIN_TOO_FAR`：`phase = 'CHECK_IN'`、`unit = 'METERS'`、`threshold_value = 500`、`measured_value > threshold_value`。
+- `CHECKOUT_TOO_FAR`：`phase = 'CHECK_OUT'`、`unit = 'METERS'`、`threshold_value = 500`、`measured_value > threshold_value`。
+- `DURATION_TOO_SHORT`：`phase = 'CHECK_OUT'`、`unit = 'SECONDS'`、`threshold_value = 300`、`0 <= measured_value < threshold_value`。
+- `INVALID_TIME_SEQUENCE`：`phase = 'CHECK_OUT'`、`unit = 'SECONDS'`、`threshold_value = 0`、`measured_value <= threshold_value`。
 
 其他约束和索引：
 
 - `PRIMARY KEY (id)`。
 - `FOREIGN KEY (visit_id) REFERENCES visits(id) ON DELETE RESTRICT`。
 - `UNIQUE (visit_id, code)` 防止同类异常重复，同时允许一次拜访保存多个不同异常。
-- `CHECK (measured_value >= 0)`；`CHECK (threshold_value > 0)`。
+- 除 `INVALID_TIME_SEQUENCE` 外，`measured_value >= 0`；该时间异常允许有符号秒数。
+- `INVALID_TIME_SEQUENCE` 的阈值必须为 `0`；其他异常的阈值必须大于 `0`。
 - `idx_compliance_findings_code_detected_at (code, detected_at)`。
 
 异常状态通过 `EXISTS compliance_findings` 派生，不在 `visits` 保存冗余 `is_abnormal`。

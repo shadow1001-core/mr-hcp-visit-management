@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from math import degrees
 from threading import Barrier
 from typing import Any
 from uuid import UUID, uuid4
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db_session
+from app.api.dependencies import get_clock, get_compliance_evaluator, get_db_session
 from app.application.services.visit_plans import CreateVisitPlanCommand, VisitPlanService
 from app.db.models import (
     ComplianceFinding,
@@ -34,6 +35,7 @@ from app.db.models import (
     VisitReport,
 )
 from app.db.seed import seed_reference_data
+from app.domain.compliance import ComplianceResult, VisitComplianceInput
 from app.main import app
 
 pytestmark = pytest.mark.integration
@@ -44,6 +46,14 @@ class ApiTestContext:
     client: TestClient
     ids: dict[str, UUID]
     connection_session: Session
+
+
+@dataclass(frozen=True)
+class FixedClock:
+    current: datetime
+
+    def now(self) -> datetime:
+        return self.current
 
 
 @pytest.fixture
@@ -343,7 +353,7 @@ def _four_workflow_states(context: ApiTestContext) -> dict[str, UUID]:
             session.add(
                 ComplianceFinding(
                     visit_id=visit.id,
-                    code=ComplianceFindingCode.CHECK_IN_LOCATION_OUT_OF_RANGE,
+                    code=ComplianceFindingCode.CHECKIN_TOO_FAR,
                     phase=CompliancePhase.CHECK_IN,
                     measured_value=Decimal("501"),
                     threshold_value=Decimal("500"),
@@ -712,3 +722,269 @@ def test_concurrent_check_in_allows_exactly_one_success(migrated_engine: Engine)
                 delete(VisitPlanProduct).where(VisitPlanProduct.plan_id == workflow_id)
             )
             cleanup_session.execute(delete(VisitPlan).where(VisitPlan.id == workflow_id))
+
+
+def _north_of(latitude: Decimal, meters: float) -> Decimal:
+    return latitude + Decimal(str(degrees(meters / 6_371_008.8)))
+
+
+def _check_in_at(
+    context: ApiTestContext,
+    workflow_id: UUID,
+    at: datetime,
+    *,
+    latitude: Decimal = Decimal("31.210460"),
+    longitude: Decimal = Decimal("121.473650"),
+) -> None:
+    app.dependency_overrides[get_clock] = lambda: FixedClock(at)
+    response = context.client.post(
+        f"/api/visits/{workflow_id}/check-in",
+        json={"latitude": str(latitude), "longitude": str(longitude)},
+    )
+    assert response.status_code == 200
+
+
+def _check_out_at(
+    context: ApiTestContext,
+    workflow_id: UUID,
+    at: datetime,
+    *,
+    latitude: Decimal = Decimal("31.210460"),
+    longitude: Decimal = Decimal("121.473650"),
+) -> Any:
+    app.dependency_overrides[get_clock] = lambda: FixedClock(at)
+    return context.client.post(
+        f"/api/visits/{workflow_id}/check-out",
+        json={"latitude": str(latitude), "longitude": str(longitude)},
+    )
+
+
+def test_check_out_after_five_minutes_is_normal(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 24, 1, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+
+    response = _check_out_at(api_context, workflow_id, checked_in_at + timedelta(minutes=5))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "CHECKED_OUT"
+    assert body["allowedActions"] == ["SUBMIT_REPORT"]
+    assert body["actualVisit"]["durationSeconds"] == "300.000000"
+    assert body["actualVisit"]["checkOut"]["distanceMeters"] == "0.000000"
+    assert body["actualVisit"]["complianceStatus"] == "NORMAL"
+    assert body["actualVisit"]["complianceFindings"] == []
+
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert visit.check_out_at == checked_in_at + timedelta(minutes=5)
+    assert visit.duration_seconds == Decimal("300.000000")
+    assert visit.check_in_distance_meters == Decimal("0.000000")
+    assert visit.check_out_distance_meters == Decimal("0.000000")
+
+
+def test_check_out_before_five_minutes_saves_duration_finding(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 24, 2, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+
+    response = _check_out_at(api_context, workflow_id, checked_in_at + timedelta(seconds=299))
+
+    assert response.status_code == 200
+    actual = response.json()["actualVisit"]
+    assert actual["complianceStatus"] == "ABNORMAL"
+    assert [finding["code"] for finding in actual["complianceFindings"]] == ["DURATION_TOO_SHORT"]
+    finding = actual["complianceFindings"][0]
+    assert finding["message"]
+    assert finding["actualValue"] == "299.000000"
+    assert finding["threshold"] == "300.000000"
+
+
+def test_check_out_saves_checkin_distance_finding(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 24, 3, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    far_latitude = _north_of(Decimal("31.210460"), 600)
+    _check_in_at(api_context, workflow_id, checked_in_at, latitude=far_latitude)
+
+    response = _check_out_at(api_context, workflow_id, checked_in_at + timedelta(minutes=5))
+
+    assert response.status_code == 200
+    actual = response.json()["actualVisit"]
+    assert actual["complianceStatus"] == "ABNORMAL"
+    assert [finding["code"] for finding in actual["complianceFindings"]] == ["CHECKIN_TOO_FAR"]
+    assert Decimal(actual["checkIn"]["distanceMeters"]) > 500
+
+
+def test_check_out_saves_checkout_distance_finding(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 24, 4, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    far_latitude = _north_of(Decimal("31.210460"), 600)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+
+    response = _check_out_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(minutes=5),
+        latitude=far_latitude,
+    )
+
+    assert response.status_code == 200
+    actual = response.json()["actualVisit"]
+    assert actual["complianceStatus"] == "ABNORMAL"
+    assert [finding["code"] for finding in actual["complianceFindings"]] == ["CHECKOUT_TOO_FAR"]
+    assert Decimal(actual["checkOut"]["distanceMeters"]) > 500
+
+
+def test_check_out_saves_all_findings_in_stable_order(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 24, 5, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    check_in_latitude = _north_of(Decimal("31.210460"), 600)
+    check_out_latitude = _north_of(Decimal("31.210460"), 700)
+    _check_in_at(api_context, workflow_id, checked_in_at, latitude=check_in_latitude)
+
+    response = _check_out_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(seconds=299),
+        latitude=check_out_latitude,
+    )
+
+    assert response.status_code == 200
+    actual = response.json()["actualVisit"]
+    assert actual["complianceStatus"] == "ABNORMAL"
+    assert [finding["code"] for finding in actual["complianceFindings"]] == [
+        "DURATION_TOO_SHORT",
+        "CHECKIN_TOO_FAR",
+        "CHECKOUT_TOO_FAR",
+    ]
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert len(visit.compliance_findings) == 3
+
+
+def test_visit_must_be_checked_in_before_check_out(api_context: ApiTestContext) -> None:
+    workflow_id = _create_plan_at(api_context, datetime(2026, 9, 24, 6, tzinfo=UTC))
+
+    response = _check_out_at(api_context, workflow_id, datetime(2026, 9, 24, 7, tzinfo=UTC))
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "VISIT_NOT_CHECKED_IN"
+
+
+def test_repeated_check_out_does_not_overwrite_original_result(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 24, 7, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+    first = _check_out_at(api_context, workflow_id, checked_in_at + timedelta(minutes=5))
+    original = first.json()["actualVisit"]
+
+    repeated = _check_out_at(
+        api_context,
+        workflow_id,
+        checked_in_at + timedelta(minutes=10),
+        latitude=Decimal("32"),
+        longitude=Decimal("122"),
+    )
+
+    assert repeated.status_code == 409
+    assert repeated.json()["error"]["code"] == "VISIT_ALREADY_CHECKED_OUT"
+    current = api_context.client.get(f"/api/visits/{workflow_id}").json()
+    assert current["actualVisit"] == original
+
+
+def test_check_out_missing_workflow_returns_not_found(api_context: ApiTestContext) -> None:
+    response = _check_out_at(api_context, uuid4(), datetime(2026, 9, 24, 8, tzinfo=UTC))
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "VISIT_WORKFLOW_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("latitude", "NaN"),
+        ("latitude", 90.000001),
+        ("latitude", -90.000001),
+        ("longitude", 180.000001),
+        ("longitude", -180.000001),
+    ],
+)
+def test_check_out_rejects_invalid_coordinates(
+    api_context: ApiTestContext, field: str, value: object
+) -> None:
+    checked_in_at = datetime(2026, 9, 24, 9, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+    payload: dict[str, object] = {"latitude": 31, "longitude": 121}
+    payload[field] = value
+
+    response = api_context.client.post(f"/api/visits/{workflow_id}/check-out", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_COORDINATES"
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert visit.check_out_at is None
+
+
+def test_check_out_rejects_server_owned_fields(api_context: ApiTestContext) -> None:
+    checked_in_at = datetime(2026, 9, 24, 10, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+
+    response = api_context.client.post(
+        f"/api/visits/{workflow_id}/check-out",
+        json={
+            "latitude": 31,
+            "longitude": 121,
+            "checkOutAt": "2026-09-24T10:05:00Z",
+            "durationSeconds": 300,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "UNEXPECTED_FIELD"
+
+
+def test_compliance_failure_rolls_back_check_out_and_findings(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 24, 11, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    _check_in_at(api_context, workflow_id, checked_in_at)
+
+    def fail_compliance(_: VisitComplianceInput) -> ComplianceResult:
+        raise RuntimeError("simulated compliance failure")
+
+    app.dependency_overrides[get_clock] = lambda: FixedClock(checked_in_at + timedelta(minutes=5))
+    app.dependency_overrides[get_compliance_evaluator] = lambda: fail_compliance
+
+    with pytest.raises(RuntimeError, match="simulated compliance failure"):
+        api_context.client.post(
+            f"/api/visits/{workflow_id}/check-out",
+            json={"latitude": 31.210460, "longitude": 121.473650},
+        )
+
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert visit.check_out_at is None
+    assert visit.check_out_latitude is None
+    assert visit.check_out_longitude is None
+    assert visit.check_out_distance_meters is None
+    assert visit.duration_seconds is None
+    assert (
+        api_context.connection_session.scalar(
+            select(func.count())
+            .select_from(ComplianceFinding)
+            .where(ComplianceFinding.visit_id == visit.id)
+        )
+        == 0
+    )

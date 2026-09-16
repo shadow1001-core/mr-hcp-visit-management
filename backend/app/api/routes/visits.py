@@ -5,18 +5,23 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db_session
+from app.api.dependencies import get_clock, get_compliance_evaluator, get_db_session
 from app.api.routes.visit_plans import _plan_response
+from app.application.clock import Clock
 from app.application.services.visit_plans import (
     CheckInCommand,
+    CheckOutCommand,
+    ComplianceEvaluator,
     VisitPlanService,
     allowed_actions,
     workflow_status,
 )
 from app.db.models import Visit, VisitPlan
+from app.domain.compliance import FINDING_MESSAGES, FindingCode
 from app.schemas.visit_plan import (
     ActualVisitView,
     CheckInRequest,
+    CheckOutRequest,
     ComplianceFindingView,
     ExecutionSummaryView,
     PaginatedVisitWorkflows,
@@ -88,9 +93,30 @@ def check_in_visit(
     workflow_id: UUID,
     request: CheckInRequest,
     session: Annotated[Session, Depends(get_db_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
 ) -> VisitWorkflowDetail:
-    plan = VisitPlanService(session).check_in(
+    plan = VisitPlanService(session, clock=clock).check_in(
         CheckInCommand(
+            workflow_id=workflow_id,
+            latitude=request.latitude,
+            longitude=request.longitude,
+        )
+    )
+    return _detail_response(plan)
+
+
+@router.post("/{workflow_id}/check-out", response_model=VisitWorkflowDetail)
+def check_out_visit(
+    workflow_id: UUID,
+    request: CheckOutRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+    clock: Annotated[Clock, Depends(get_clock)],
+    compliance_evaluator: Annotated[ComplianceEvaluator, Depends(get_compliance_evaluator)],
+) -> VisitWorkflowDetail:
+    plan = VisitPlanService(
+        session, clock=clock, compliance_evaluator=compliance_evaluator
+    ).check_out(
+        CheckOutCommand(
             workflow_id=workflow_id,
             latitude=request.latitude,
             longitude=request.longitude,
@@ -133,7 +159,16 @@ def _summary(plan: VisitPlan) -> VisitWorkflowSummary:
 
 
 def _actual_visit(visit: Visit) -> ActualVisitView:
-    findings = sorted(visit.compliance_findings, key=lambda item: (item.detected_at, item.code))
+    finding_order = {
+        "INVALID_TIME_SEQUENCE": 0,
+        "DURATION_TOO_SHORT": 0,
+        "CHECKIN_TOO_FAR": 1,
+        "CHECKOUT_TOO_FAR": 2,
+    }
+    findings = sorted(
+        visit.compliance_findings,
+        key=lambda item: (item.detected_at, finding_order[str(item.code)]),
+    )
     return ActualVisitView(
         check_in=VisitMomentView(
             at=visit.check_in_at,
@@ -169,15 +204,20 @@ def _actual_visit(visit: Visit) -> ActualVisitView:
         compliance_findings=[
             ComplianceFindingView(
                 code=finding.code,
+                message=_finding_message(finding.code),
+                actual_value=finding.measured_value,
+                threshold=finding.threshold_value,
                 phase=finding.phase,
-                measured_value=finding.measured_value,
-                threshold_value=finding.threshold_value,
                 unit=finding.unit,
                 detected_at=finding.detected_at,
             )
             for finding in findings
         ],
     )
+
+
+def _finding_message(code: str) -> str:
+    return FINDING_MESSAGES[FindingCode(str(code))]
 
 
 def _report(visit: Visit) -> dict[str, object] | None:

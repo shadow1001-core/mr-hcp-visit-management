@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -20,6 +21,12 @@ from app.db.models import (
     VisitPlan,
 )
 from app.db.repositories.visit_plans import VisitPlanRepository
+from app.domain.compliance import (
+    ComplianceResult,
+    GeoPoint,
+    VisitComplianceInput,
+    evaluate_visit_compliance,
+)
 from app.domain.errors import BusinessError, ErrorDetail
 from app.domain.geography import haversine_distance_meters
 
@@ -68,11 +75,27 @@ class CheckInCommand:
     longitude: Decimal
 
 
+@dataclass(frozen=True)
+class CheckOutCommand:
+    workflow_id: UUID
+    latitude: Decimal
+    longitude: Decimal
+
+
+ComplianceEvaluator = Callable[[VisitComplianceInput], ComplianceResult]
+
+
 class VisitPlanService:
-    def __init__(self, session: Session, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        clock: Clock | None = None,
+        compliance_evaluator: ComplianceEvaluator = evaluate_visit_compliance,
+    ) -> None:
         self.session = session
         self.repository = VisitPlanRepository(session)
         self.clock = clock or SystemClock()
+        self.compliance_evaluator = compliance_evaluator
 
     def create(self, request: CreateVisitPlanCommand) -> CreatedVisitPlan:
         with self.session.begin():
@@ -244,6 +267,74 @@ class VisitPlanService:
                     )
                 ],
             ) from exc
+
+    def check_out(self, request: CheckOutCommand) -> VisitPlan:
+        with self.session.begin():
+            plan = self.repository.lock_workflow(request.workflow_id)
+            if plan is None:
+                raise BusinessError(
+                    code="VISIT_WORKFLOW_NOT_FOUND",
+                    message="The visit workflow was not found.",
+                    status_code=404,
+                    details=[
+                        ErrorDetail(field="id", reason="NOT_FOUND", value=request.workflow_id)
+                    ],
+                )
+            visit = self.repository.find_visit_for_plan(plan.id)
+            if visit is None:
+                raise BusinessError(
+                    code="VISIT_NOT_CHECKED_IN",
+                    message="The visit must be checked in before check-out.",
+                    status_code=409,
+                    details=[
+                        ErrorDetail(
+                            field="id", reason="VISIT_NOT_CHECKED_IN", value=request.workflow_id
+                        )
+                    ],
+                )
+            if visit.check_out_at is not None:
+                raise BusinessError(
+                    code="VISIT_ALREADY_CHECKED_OUT",
+                    message="The visit has already been checked out.",
+                    status_code=409,
+                    details=[
+                        ErrorDetail(
+                            field="id",
+                            reason="VISIT_ALREADY_CHECKED_OUT",
+                            value=request.workflow_id,
+                        )
+                    ],
+                )
+
+            checked_out_at = self.clock.now().astimezone(UTC)
+            latitude = request.latitude.quantize(Decimal("0.000001"))
+            longitude = request.longitude.quantize(Decimal("0.000001"))
+            result = self.compliance_evaluator(
+                VisitComplianceInput(
+                    check_in_at=visit.check_in_at,
+                    check_out_at=checked_out_at,
+                    hospital_location=GeoPoint(
+                        latitude=float(visit.hospital_latitude_snapshot),
+                        longitude=float(visit.hospital_longitude_snapshot),
+                    ),
+                    check_in_location=GeoPoint(
+                        latitude=float(visit.check_in_latitude),
+                        longitude=float(visit.check_in_longitude),
+                    ),
+                    check_out_location=GeoPoint(
+                        latitude=float(latitude),
+                        longitude=float(longitude),
+                    ),
+                )
+            )
+            self.repository.complete_visit(
+                visit=visit,
+                check_out_at=checked_out_at,
+                latitude=latitude,
+                longitude=longitude,
+                result=result,
+            )
+            return plan
 
     @staticmethod
     def _validate_range(

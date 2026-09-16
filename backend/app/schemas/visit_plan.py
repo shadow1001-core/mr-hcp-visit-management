@@ -57,6 +57,10 @@ class CheckInRequest(BaseModel):
         return value
 
 
+class CheckOutRequest(CheckInRequest):
+    pass
+
+
 class ReferenceView(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -135,9 +139,10 @@ class ComplianceFindingView(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     code: str
+    message: str
+    actual_value: Decimal
+    threshold: Decimal
     phase: str
-    measured_value: Decimal
-    threshold_value: Decimal
     unit: str
     detected_at: datetime
 

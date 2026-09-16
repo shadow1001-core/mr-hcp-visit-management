@@ -4,18 +4,19 @@
 
 本模块把一次完整拜访的时间和位置事实转换为零到多个结构化 `finding`。核心算法是无数据库、无网络、无系统时钟依赖的纯函数：相同输入必须得到相同输出，不修改输入，也不读取当前时间。
 
-本设计只定义领域算法和测试策略，不修改 ORM、迁移、Service 或 API。
+本设计定义领域算法和测试策略；持久化对齐由后续签退切片的 Alembic migration 完成。
 
-### 1.1 与当前 Schema 的兼容性差异
+### 1.1 持久化对齐
 
-本轮业务规则与当前 `database-design.md` 及数据库约束存在以下差异，实现持久化前必须先协调迁移，不能只修改 Python 枚举：
+签退切片通过 migration `20260916_0002` 完成以下对齐：
 
-1. 当前数据库使用 `CHECK_IN_LOCATION_OUT_OF_RANGE` 和 `CHECK_OUT_LOCATION_OUT_OF_RANGE`，本轮规则改为 `CHECKIN_TOO_FAR` 和 `CHECKOUT_TOO_FAR`。
-2. 当前 `compliance_findings.code` CHECK 不包含 `INVALID_TIME_SEQUENCE`，其 code/phase/unit 组合 CHECK 也没有对应分支。
-3. 当前 `visits` 有 `CHECK (check_out_at >= check_in_at)`，会直接拒绝“签退早于签到”的事实，因而无法先保存该事实再保存 `INVALID_TIME_SEQUENCE`。
-4. 当前 finding 要求 `measured_value >= 0`、`threshold_value > 0`；而时间顺序 finding 最自然的测量值是有符号时间差，阈值是 `0` 秒。
+1. 将旧距离异常码迁移为 `CHECKIN_TOO_FAR` 和 `CHECKOUT_TOO_FAR`。
+2. 在 `compliance_findings` 的代码集合和语义 CHECK 中加入 `INVALID_TIME_SEQUENCE`。
+3. 允许该 finding 保存有符号时间差，并规定阈值为 `0` 秒。
+4. 移除 `visits` 对签退时间顺序和非负时长的 CHECK，以保留服务端采集到的原始事实；异常由纯函数判定。
 
-未来实现前建议通过新 Alembic migration 同步更新代码集合和 finding 语义约束，并决定是否允许保存非法时间顺序的原始事实。迁移方案确认前，领域模块仍可独立实现和测试，但 `INVALID_TIME_SEQUENCE` 不能直接映射到当前数据库结构。
+数据库仍只负责单行字段完整性和 finding 语义；只有 `CHECKED_IN` 可以签退、重复签退不得覆盖
+首次结果等状态机规则由 Service 在锁定工作流行的事务内保证。
 
 ## 2. 业务常量
 

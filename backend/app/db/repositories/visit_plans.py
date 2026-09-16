@@ -12,6 +12,9 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import (
     ComplianceFinding,
+    ComplianceFindingCode,
+    CompliancePhase,
+    ComplianceUnit,
     Department,
     Hcp,
     HcpPractice,
@@ -25,6 +28,7 @@ from app.db.models import (
     VisitProduct,
     VisitReport,
 )
+from app.domain.compliance import ComplianceResult
 
 VISIT_STATUS = case(
     (Visit.id.is_(None), "PLANNED"),
@@ -241,6 +245,34 @@ class VisitPlanRepository:
         self.session.add(visit)
         self.session.flush()
         return visit
+
+    def complete_visit(
+        self,
+        *,
+        visit: Visit,
+        check_out_at: datetime,
+        latitude: Decimal,
+        longitude: Decimal,
+        result: ComplianceResult,
+    ) -> None:
+        six_places = Decimal("0.000001")
+        visit.check_out_at = check_out_at
+        visit.check_out_latitude = latitude
+        visit.check_out_longitude = longitude
+        visit.check_out_distance_meters = result.check_out_distance_meters.quantize(six_places)
+        visit.compliance_findings = [
+            ComplianceFinding(
+                code=ComplianceFindingCode(finding.code.value),
+                phase=CompliancePhase(finding.phase.value),
+                measured_value=finding.actual_value.quantize(six_places),
+                threshold_value=finding.threshold.quantize(six_places),
+                unit=ComplianceUnit(finding.unit.value),
+                detected_at=check_out_at,
+            )
+            for finding in result.findings
+        ]
+        self.session.flush()
+        self.session.refresh(visit, attribute_names=["duration_seconds", "updated_at"])
 
     @staticmethod
     def _workflow_base_query() -> Select[tuple[VisitPlan]]:

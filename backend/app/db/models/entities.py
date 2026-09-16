@@ -280,13 +280,6 @@ class Visit(UpdatedAtMixin, Base):
             "AND check_out_longitude IS NOT NULL AND check_out_distance_meters IS NOT NULL)",
             name="check_out_fields_complete",
         ),
-        CheckConstraint(
-            "check_out_at IS NULL OR check_out_at >= check_in_at",
-            name="check_out_not_before_check_in",
-        ),
-        CheckConstraint(
-            "duration_seconds IS NULL OR duration_seconds >= 0", name="duration_nonnegative"
-        ),
         CheckConstraint("updated_at >= created_at", name="updated_not_before_created"),
         Index("idx_visits_check_in_at_id", "check_in_at", "id"),
     )
@@ -449,24 +442,34 @@ class ComplianceFinding(CreatedAtMixin, Base):
     __table_args__ = (
         UniqueConstraint("visit_id", "code", name="uq_compliance_findings_visit_code"),
         CheckConstraint(
-            "code IN ('CHECK_IN_LOCATION_OUT_OF_RANGE', "
-            "'CHECK_OUT_LOCATION_OUT_OF_RANGE', 'DURATION_TOO_SHORT')",
+            "code IN ('DURATION_TOO_SHORT', 'CHECKIN_TOO_FAR', "
+            "'CHECKOUT_TOO_FAR', 'INVALID_TIME_SEQUENCE')",
             name="code_allowed",
         ),
         CheckConstraint("phase IN ('CHECK_IN', 'CHECK_OUT')", name="phase_allowed"),
         CheckConstraint("unit IN ('METERS', 'SECONDS')", name="unit_allowed"),
-        CheckConstraint("measured_value >= 0", name="measured_value_nonnegative"),
-        CheckConstraint("threshold_value > 0", name="threshold_value_positive"),
         CheckConstraint(
-            "(code = 'CHECK_IN_LOCATION_OUT_OF_RANGE' AND phase = 'CHECK_IN' "
+            "code = 'INVALID_TIME_SEQUENCE' OR measured_value >= 0",
+            name="measured_value_valid",
+        ),
+        CheckConstraint(
+            "(code = 'INVALID_TIME_SEQUENCE' AND threshold_value = 0) OR "
+            "(code <> 'INVALID_TIME_SEQUENCE' AND threshold_value > 0)",
+            name="threshold_value_valid",
+        ),
+        CheckConstraint(
+            "(code = 'CHECKIN_TOO_FAR' AND phase = 'CHECK_IN' "
             "AND unit = 'METERS' AND threshold_value = 500 "
             "AND measured_value > threshold_value) OR "
-            "(code = 'CHECK_OUT_LOCATION_OUT_OF_RANGE' AND phase = 'CHECK_OUT' "
+            "(code = 'CHECKOUT_TOO_FAR' AND phase = 'CHECK_OUT' "
             "AND unit = 'METERS' AND threshold_value = 500 "
             "AND measured_value > threshold_value) OR "
             "(code = 'DURATION_TOO_SHORT' AND phase = 'CHECK_OUT' "
             "AND unit = 'SECONDS' AND threshold_value = 300 "
-            "AND measured_value < threshold_value)",
+            "AND measured_value >= 0 AND measured_value < threshold_value) OR "
+            "(code = 'INVALID_TIME_SEQUENCE' AND phase = 'CHECK_OUT' "
+            "AND unit = 'SECONDS' AND threshold_value = 0 "
+            "AND measured_value <= threshold_value)",
             name="code_semantics",
         ),
         Index("idx_compliance_findings_code_detected_at", "code", "detected_at"),

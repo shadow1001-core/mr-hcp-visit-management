@@ -155,16 +155,20 @@ HTTP 状态区分：
 
 - `IN_PROGRESS`：已签到未签退且当前尚无异常；
 - `NORMAL`：已签退且没有异常；
-- `ABNORMAL`：已有至少一个异常，可能仍处于未签退状态。
+- `ABNORMAL`：已签退且至少有一个异常。
+
+生命周期状态与合规状态是两个维度：成功签退后生命周期统一为 `CHECKED_OUT`，合规状态再由
+`complianceFindings` 是否为空派生为 `NORMAL` 或 `ABNORMAL`，数据库不保存冗余状态列。
 
 结构化异常字段：
 
 ```json
 {
-  "code": "CHECK_IN_LOCATION_OUT_OF_RANGE",
+  "code": "CHECKIN_TOO_FAR",
+  "message": "Check-in location is more than 500 meters from the hospital",
+  "actualValue": "612.345678",
+  "threshold": "500.000000",
   "phase": "CHECK_IN",
-  "measuredValue": 612.345678,
-  "thresholdValue": 500,
   "unit": "METERS",
   "detectedAt": "2026-09-21T01:28:10Z"
 }
@@ -265,8 +269,8 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
     "checkInAt": "2026-09-21T01:28:10Z",
     "checkOutAt": null,
     "durationSeconds": null,
-    "isAbnormal": true,
-    "findingCodes": ["CHECK_IN_LOCATION_OUT_OF_RANGE"]
+    "isAbnormal": false,
+    "findingCodes": []
   },
   "reportSubmittedAt": null
 }
@@ -373,8 +377,10 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 }
 ```
 
-成功事务使用服务端 UTC Clock 生成签退时间，计算签退距离和精确停留秒数，追加而非覆盖异常，
-并返回 `200 OK` 和完整工作流详情。
+成功事务使用服务端 UTC Clock 生成签退时间，由数据库生成列计算精确停留秒数，调用纯函数
+计算签到/签退距离与全部合规异常，并在同一事务中一次性保存签退事实和 findings。成功返回
+`200 OK` 和完整工作流详情；生命周期状态为 `CHECKED_OUT`，合规状态独立派生为 `NORMAL`
+或 `ABNORMAL`。
 
 错误：
 
@@ -384,6 +390,7 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 | `409` | `VISIT_NOT_CHECKED_IN`      | 当前为 `PLANNED`                   |
 | `409` | `VISIT_ALREADY_CHECKED_OUT` | 当前为 `CHECKED_OUT` 或 `REPORTED` |
 | `422` | `INVALID_COORDINATES`       | 纬度或经度非法                     |
+| `422` | `UNEXPECTED_FIELD`          | 请求包含坐标以外的字段             |
 | `422` | `VALIDATION_ERROR`          | 请求结构或路径 ID 非法             |
 
 重复/并发：第一次成功后，重复请求稳定返回 `409 VISIT_ALREADY_CHECKED_OUT`；不得覆盖首次
@@ -506,8 +513,8 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 - 异常拜访仍计入 `totalVisitCount`，并计入 `abnormalVisitCount`。
 - 同一拜访同一产品最多计数一次；多产品拜访分别计入各产品。
 - 多个异常原因不会重复增加同一产品的 `abnormalVisitCount`。
-- `compliancePendingVisitCount` 统计尚未签退的拜访；它可以与 `abnormalVisitCount` 重叠，因为
-  已签到未签退的拜访可能已经存在签到地点异常。
+- `compliancePendingVisitCount` 统计尚未签退的拜访。当前切片在签退时一次性运行完整合规校验，
+  因此 pending 与 `abnormalVisitCount` 不重叠。
 - 无筛选时只返回当月至少一次拜访的产品，按 `totalVisitCount desc, product.code asc` 排序。
 - MVP 预计产品数量有限，本聚合接口不分页；列表分页规则不适用于本接口。
 
