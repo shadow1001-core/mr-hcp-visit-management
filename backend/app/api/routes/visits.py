@@ -26,6 +26,7 @@ from app.schemas.visit_plan import (
     CheckInRequest,
     CheckOutRequest,
     ComplianceFindingView,
+    CoordinateView,
     DetailingRecordView,
     ExecutionSummaryView,
     MaterialDistributionView,
@@ -169,10 +170,21 @@ def upsert_visit_report(
 
 def _detail_response(plan: VisitPlan) -> VisitWorkflowDetail:
     status = cast(VisitStatus, workflow_status(plan))
+    hospital = plan.hcp_practice.hospital_department.hospital
+    hospital_latitude = (
+        plan.visit.hospital_latitude_snapshot if plan.visit is not None else hospital.latitude
+    )
+    hospital_longitude = (
+        plan.visit.hospital_longitude_snapshot if plan.visit is not None else hospital.longitude
+    )
     return VisitWorkflowDetail(
         id=plan.id,
         status=status,
         plan=_plan_response(plan),
+        hospital_coordinates=CoordinateView(
+            latitude=hospital_latitude,
+            longitude=hospital_longitude,
+        ),
         actual_visit=_actual_visit(plan.visit) if plan.visit is not None else None,
         report=_report(plan.visit) if status == "REPORTED" and plan.visit is not None else None,
         allowed_actions=cast(

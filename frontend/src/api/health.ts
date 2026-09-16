@@ -1,13 +1,9 @@
-import { apiClient } from './client'
-
-export interface HealthResponse {
-  status: 'ok'
-  service: string
-  version: string
-  environment: string
-}
+import { systemClient } from './client'
+import type { HealthResponse } from './types'
 
 export async function getHealth(): Promise<HealthResponse> {
-  const response = await apiClient.get<HealthResponse>('/health')
+  const response = await systemClient.get<HealthResponse>('/health')
   return response.data
 }
+
+export type { HealthResponse } from './types'

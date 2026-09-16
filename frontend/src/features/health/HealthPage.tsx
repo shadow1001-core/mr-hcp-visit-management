@@ -1,15 +1,9 @@
-import {
-  Alert,
-  Button,
-  Card,
-  Descriptions,
-  Space,
-  Spin,
-  Typography,
-} from 'antd'
+import { Alert, Button, Descriptions, Space, Spin } from 'antd'
 import { useCallback, useEffect, useState } from 'react'
 
+import { getErrorMessage } from '../../api/errors'
 import { getHealth, type HealthResponse } from '../../api/health'
+import { PageHeader } from '../../components/PageHeader'
 
 export function HealthPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
@@ -22,9 +16,9 @@ export function HealthPage() {
 
     try {
       setHealth(await getHealth())
-    } catch {
+    } catch (requestError: unknown) {
       setHealth(null)
-      setError('无法连接后端健康检查接口，请确认 API 已启动。')
+      setError(getErrorMessage(requestError))
     } finally {
       setLoading(false)
     }
@@ -35,9 +29,12 @@ export function HealthPage() {
   }, [loadHealth])
 
   return (
-    <Card>
+    <div className="page-stack page-narrow">
+      <PageHeader
+        title="系统状态"
+        description="检查前端当前配置指向的后端服务是否可用。"
+      />
       <Space direction="vertical" size="large" className="full-width">
-        <Typography.Title level={2}>系统状态</Typography.Title>
         {loading && <Spin tip="正在检查后端服务" />}
         {error && <Alert type="error" message={error} showIcon />}
         {health && (
@@ -54,6 +51,6 @@ export function HealthPage() {
           重新检查
         </Button>
       </Space>
-    </Card>
+    </div>
   )
 }

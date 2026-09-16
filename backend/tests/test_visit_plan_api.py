@@ -140,6 +140,57 @@ def _integrity_error(constraint_name: str) -> IntegrityError:
     return IntegrityError("test statement", {}, _ConstraintViolation(constraint_name))
 
 
+def test_visit_planning_reference_data_returns_active_linked_options(
+    api_context: ApiTestContext,
+) -> None:
+    response = api_context.client.get("/api/reference-data/visit-planning")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["code"] for item in body["medicalRepresentatives"]] == ["MR-SH-001"]
+    assert {item["code"] for item in body["products"]} == {
+        "PROD-CARD-001",
+        "PROD-CARD-002",
+        "PROD-META-001",
+    }
+    assert {
+        (
+            item["hospital"]["code"],
+            item["department"]["code"],
+            item["hcp"]["code"],
+        )
+        for item in body["practices"]
+    } == {
+        ("HOSP-SH-RJ", "DEPT-CARD", "HCP-SH-001"),
+        ("HOSP-SH-RJ", "DEPT-ENDO", "HCP-SH-002"),
+        ("HOSP-SH-ZS", "DEPT-CARD", "HCP-SH-003"),
+    }
+
+
+def test_visit_planning_reference_data_excludes_inactive_options(
+    api_context: ApiTestContext,
+) -> None:
+    session = api_context.connection_session
+    session.execute(
+        update(Product)
+        .where(Product.id == api_context.ids["product_card_a"])
+        .values(is_active=False)
+    )
+    session.execute(
+        update(HcpPractice)
+        .where(HcpPractice.hcp_id == api_context.ids["hcp_ruijin_card"])
+        .values(is_active=False)
+    )
+    session.flush()
+
+    response = api_context.client.get("/api/reference-data/visit-planning")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "PROD-CARD-001" not in {item["code"] for item in body["products"]}
+    assert "HCP-SH-001" not in {item["hcp"]["code"] for item in body["practices"]}
+
+
 def test_create_visit_plan_writes_snapshots_and_no_actual_visit(
     api_context: ApiTestContext,
 ) -> None:
@@ -550,6 +601,12 @@ def test_visit_detail_returns_display_data_and_state_actions(
         assert body["allowedActions"] == expected_actions[status_name]
         assert body["plan"]["mr"]["name"] == "王晨"
         assert body["plan"]["hcpPractice"]["hospital"]["code"] == "HOSP-SH-RJ"
+        expected_coordinates = (
+            {"latitude": "31.210460", "longitude": "121.473650"}
+            if status_name == "PLANNED"
+            else {"latitude": "31.210461", "longitude": "121.473651"}
+        )
+        assert body["hospitalCoordinates"] == expected_coordinates
         assert len(body["plan"]["targetProducts"]) == 2
         assert (body["actualVisit"] is None) == (status_name == "PLANNED")
         assert (body["report"] is not None) == (status_name == "REPORTED")

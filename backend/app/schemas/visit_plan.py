@@ -204,6 +204,13 @@ class VisitMomentView(BaseModel):
     distance_meters: Decimal
 
 
+class CoordinateView(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    latitude: Decimal
+    longitude: Decimal
+
+
 class ComplianceFindingView(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -263,6 +270,7 @@ class VisitWorkflowDetail(BaseModel):
     id: UUID
     status: VisitStatus
     plan: VisitPlanResponse
+    hospital_coordinates: CoordinateView
     actual_visit: ActualVisitView | None
     report: VisitReportView | None
     allowed_actions: list[Literal["CHECK_IN", "CHECK_OUT", "SUBMIT_REPORT", "UPDATE_REPORT"]]

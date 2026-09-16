@@ -174,6 +174,35 @@ HTTP 状态区分：
 }
 ```
 
+### 3.5 创建计划主数据
+
+#### `GET /api/reference-data/visit-planning`
+
+返回创建计划页面所需的启用主数据和有效执业关系，不分页：
+
+```json
+{
+  "medicalRepresentatives": [
+    { "id": "...", "code": "MR-SH-001", "name": "王晨" }
+  ],
+  "products": [
+    { "id": "...", "code": "PROD-CARD-001", "name": "心血管产品 A" }
+  ],
+  "practices": [
+    {
+      "id": "...",
+      "hcp": { "id": "...", "code": "HCP-SH-001", "name": "陈医生" },
+      "hospital": { "id": "...", "code": "HOSP-SH-RJ", "name": "瑞金医院" },
+      "department": { "id": "...", "code": "DEPT-CARD", "name": "心内科" }
+    }
+  ]
+}
+```
+
+只返回启用的 MR、产品，以及 MR 创建计划时可用的医院—科室—医生执业关系。`practices` 仅用于
+前端联动选择；创建计划时客户端仍提交 `mrId`、`hospitalId`、`departmentId`、`hcpId` 和产品 ID，
+不得提交内部 `hcpPracticeId`。接口为只读、幂等，无请求体。
+
 ## 4. 创建拜访计划
 
 ### `POST /api/visit-plans`
@@ -304,6 +333,7 @@ Service 必须使用四个主数据 ID 精确解析一条启用的 `hcp_practice
 | `id`             | UUID            | 工作流 ID                 |
 | `status`         | enum            | 当前派生状态              |
 | `plan`           | `VisitPlanView` | 计划及历史快照            |
+| `hospitalCoordinates` | object | 医院坐标；签到后为当次合规计算使用的医院坐标快照 |
 | `actualVisit`    | object/null     | 签到后存在，结构见 3.4 节 |
 | `report`         | object/null     | `REPORTED` 时存在         |
 | `allowedActions` | string[]        | 当前状态允许的下一步操作  |
