@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_clock, get_compliance_evaluator, get_db_session
@@ -125,6 +126,20 @@ def _valid_payload(context: ApiTestContext) -> dict[str, Any]:
     }
 
 
+class _ConstraintDiagnostic:
+    def __init__(self, constraint_name: str) -> None:
+        self.constraint_name = constraint_name
+
+
+class _ConstraintViolation(Exception):
+    def __init__(self, constraint_name: str) -> None:
+        self.diag = _ConstraintDiagnostic(constraint_name)
+
+
+def _integrity_error(constraint_name: str) -> IntegrityError:
+    return IntegrityError("test statement", {}, _ConstraintViolation(constraint_name))
+
+
 def test_create_visit_plan_writes_snapshots_and_no_actual_visit(
     api_context: ApiTestContext,
 ) -> None:
@@ -196,6 +211,47 @@ def test_create_visit_plan_reports_missing_product(api_context: ApiTestContext) 
         str(first_missing_id),
         str(second_missing_id),
     ]
+    assert api_context.connection_session.scalar(select(func.count()).select_from(VisitPlan)) == 0
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "expected_status", "expected_code"),
+    [
+        (
+            "fk_visit_plans_mr_id_medical_representatives",
+            404,
+            "MR_NOT_FOUND",
+        ),
+        (
+            "fk_visit_plans_hcp_practice_id_hcp_practices",
+            422,
+            "HCP_PRACTICE_MISMATCH",
+        ),
+        (
+            "fk_visit_plan_products_product_id_products",
+            404,
+            "PRODUCT_NOT_FOUND",
+        ),
+        ("pk_visit_plan_products", 422, "DUPLICATE_PRODUCT_ID"),
+    ],
+)
+def test_create_visit_plan_maps_known_constraint_races_to_stable_business_errors(
+    api_context: ApiTestContext,
+    monkeypatch: pytest.MonkeyPatch,
+    constraint_name: str,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    def fail_with_constraint_race(self: VisitPlanRepository, **_: Any) -> None:
+        raise _integrity_error(constraint_name)
+
+    monkeypatch.setattr(VisitPlanRepository, "create_plan", fail_with_constraint_race)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/visit-plans", json=_valid_payload(api_context))
+
+    assert response.status_code == expected_status
+    assert response.json()["error"]["code"] == expected_code
     assert api_context.connection_session.scalar(select(func.count()).select_from(VisitPlan)) == 0
 
 
@@ -592,6 +648,33 @@ def test_check_in_accepts_exact_coordinate_boundaries(api_context: ApiTestContex
     assert response.json()["status"] == "CHECKED_IN"
 
 
+def test_far_check_in_immediately_persists_location_finding(
+    api_context: ApiTestContext,
+) -> None:
+    checked_in_at = datetime(2026, 9, 22, 2, tzinfo=UTC)
+    workflow_id = _create_plan_at(api_context, checked_in_at)
+    far_latitude = _north_of(Decimal("31.210460"), 600)
+    app.dependency_overrides[get_clock] = lambda: FixedClock(checked_in_at)
+
+    response = api_context.client.post(
+        f"/api/visits/{workflow_id}/check-in",
+        json={"latitude": str(far_latitude), "longitude": "121.473650"},
+    )
+
+    assert response.status_code == 200
+    actual = response.json()["actualVisit"]
+    assert actual["complianceStatus"] == "ABNORMAL"
+    assert [finding["code"] for finding in actual["complianceFindings"]] == ["CHECKIN_TOO_FAR"]
+    assert actual["complianceFindings"][0]["detectedAt"] == "2026-09-22T02:00:00Z"
+
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert [finding.code for finding in visit.compliance_findings] == [
+        ComplianceFindingCode.CHECKIN_TOO_FAR
+    ]
+
+
 def test_check_in_rejects_server_owned_fields(api_context: ApiTestContext) -> None:
     workflow_id = _create_plan_at(api_context, datetime(2026, 9, 22, 1, tzinfo=UTC))
 
@@ -970,11 +1053,20 @@ def test_compliance_failure_rolls_back_check_out_and_findings(
     app.dependency_overrides[get_clock] = lambda: FixedClock(checked_in_at + timedelta(minutes=5))
     app.dependency_overrides[get_compliance_evaluator] = lambda: fail_compliance
 
-    with pytest.raises(RuntimeError, match="simulated compliance failure"):
-        api_context.client.post(
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
             f"/api/visits/{workflow_id}/check-out",
             json={"latitude": 31.210460, "longitude": 121.473650},
         )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "INTERNAL_SERVER_ERROR",
+            "message": "An unexpected server error occurred.",
+            "details": [],
+        }
+    }
 
     api_context.connection_session.expire_all()
     visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
@@ -1359,3 +1451,49 @@ def test_report_replacement_failure_rolls_back_original_report(
     current = api_context.client.get(f"/api/visits/{workflow_id}")
     assert current.status_code == 200
     assert current.json()["report"] == original_report
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "expected_code"),
+    [
+        ("pk_academic_detailing_records", "DUPLICATE_DETAILING_PRODUCT"),
+        (
+            "fk_academic_detailing_records_visit_id_visit_products",
+            "REPORT_PRODUCT_NOT_IN_VISIT",
+        ),
+        (
+            "fk_material_distributions_visit_id_visit_products",
+            "REPORT_PRODUCT_NOT_IN_VISIT",
+        ),
+        (
+            "ck_material_distributions_quantity_nonnegative",
+            "INVALID_MATERIAL_QUANTITY",
+        ),
+    ],
+)
+def test_report_maps_known_constraint_races_to_stable_business_errors(
+    api_context: ApiTestContext,
+    monkeypatch: pytest.MonkeyPatch,
+    constraint_name: str,
+    expected_code: str,
+) -> None:
+    checked_in_at = datetime(2026, 9, 25, 10, tzinfo=UTC)
+    workflow_id = _checked_out_workflow(api_context, checked_in_at)
+
+    def fail_with_constraint_race(self: VisitPlanRepository, **_: Any) -> None:
+        raise _integrity_error(constraint_name)
+
+    monkeypatch.setattr(VisitPlanRepository, "replace_report", fail_with_constraint_race)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.put(
+            f"/api/visits/{workflow_id}/report",
+            json=_valid_report_payload(api_context),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == expected_code
+    api_context.connection_session.expire_all()
+    visit = api_context.connection_session.scalar(select(Visit).where(Visit.plan_id == workflow_id))
+    assert visit is not None
+    assert visit.report is None

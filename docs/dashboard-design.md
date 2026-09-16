@@ -12,7 +12,7 @@
 
 - 月份使用严格的 `YYYY-MM` 格式；统计依据是 `visits.check_in_at`，不是计划或签退时间。
 - 产品关系使用签到时固化的 `visit_products`，不是计划产品或报告中的沟通明细。
-- 已签到但未签退的拜访计入总数，归为 `pending_count`，不得归为正常或异常。
+- 已签到但未签退且尚无 finding 的拜访计入 `pending_count`；已有签到超距 finding 时计入异常数。
 - 异常判断采用 `EXISTS compliance_findings`，避免多个 finding 放大计数。
 - 推荐查询形状能保证每个“产品 + 拜访”只有一行，因此聚合可使用 `COUNT(*)`；不依赖
   `COUNT(DISTINCT visit_id)` 掩盖错误 JOIN。
@@ -36,7 +36,8 @@ AND check_in_at < end_utc
 
 | 实际拜访情况 | 计入 `total_count` | 计入 `normal_count` | 计入 `abnormal_count` | 计入 `pending_count` |
 | --- | ---: | ---: | ---: | ---: |
-| `CHECKED_IN`，尚未签退 | 是 | 否 | 否 | 是 |
+| `CHECKED_IN`，尚未签退且无 finding | 是 | 否 | 否 | 是 |
+| `CHECKED_IN`，存在签到超距 finding | 是 | 否 | 是 | 否 |
 | `CHECKED_OUT`，无 finding | 是 | 是 | 否 | 否 |
 | `REPORTED`，无 finding | 是 | 是 | 否 | 否 |
 | `CHECKED_OUT` 或 `REPORTED`，至少一个 finding | 是 | 否 | 是 | 否 |
@@ -56,12 +57,12 @@ total_count = normal_count + abnormal_count + pending_count
 当前 Schema 不持久化单独的 `compliance_status` 字段；看板根据签退事实和 finding 是否存在派生
 分类，避免冗余状态与明细不一致：
 
-- 待判定：`check_out_at IS NULL`。
-- 异常：`check_out_at IS NOT NULL` 且至少存在一条 `compliance_findings`。
+- 待判定：`check_out_at IS NULL` 且不存在 `compliance_findings`。
+- 异常：至少存在一条 `compliance_findings`；签到超距可以在签退前确定。
 - 正常：`check_out_at IS NOT NULL` 且不存在 `compliance_findings`。
 
-`check_out_at IS NOT NULL` 是正常或异常分类的前置条件。即使因异常数据导致未签退拜访意外存在
-finding，也仍归为待判定，避免把未完成的拜访当作完整合规结论。
+未签退且存在签到 finding 的拜访已能确定“至少异常”，因此计入异常数；这不表示最终 finding
+集合已经完整，停留时长和签退位置仍需在签退时评估。
 
 ## 3. 产品统计来源
 
@@ -142,10 +143,16 @@ visits -> visit_products -> compliance_findings
 WITH eligible_visits AS (
     SELECT
         v.id AS visit_id,
-        (v.check_out_at IS NULL) AS is_pending,
         (
-            v.check_out_at IS NOT NULL
-            AND EXISTS (
+            v.check_out_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM compliance_findings AS cf
+                WHERE cf.visit_id = v.id
+            )
+        ) AS is_pending,
+        (
+            EXISTS (
                 SELECT 1
                 FROM compliance_findings AS cf
                 WHERE cf.visit_id = v.id
@@ -174,7 +181,7 @@ aggregated AS (
             WHERE NOT is_pending AND NOT is_abnormal
         ) AS normal_count,
         COUNT(*) FILTER (
-            WHERE NOT is_pending AND is_abnormal
+            WHERE is_abnormal
         ) AS abnormal_count,
         COUNT(*) FILTER (
             WHERE is_pending

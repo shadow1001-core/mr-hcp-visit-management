@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -9,6 +10,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.domain.errors import BusinessError
+
+logger = logging.getLogger(__name__)
 
 VALIDATION_CODE_BY_TYPE = {
     "detailing_records_required": "DETAILING_RECORDS_REQUIRED",
@@ -69,6 +72,20 @@ async def http_error_handler(_: Request, exc: Exception) -> JSONResponse:
             }
         },
         headers=exc.headers,
+    )
+
+
+async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    logger.error("Unhandled application error", exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": "An unexpected server error occurred.",
+                "details": [],
+            }
+        },
     )
 
 

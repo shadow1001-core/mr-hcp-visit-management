@@ -25,6 +25,7 @@ from app.domain.compliance import (
     ComplianceResult,
     GeoPoint,
     VisitComplianceInput,
+    evaluate_check_in_distance,
     evaluate_visit_compliance,
 )
 from app.domain.errors import BusinessError, ErrorDetail
@@ -155,15 +156,18 @@ class VisitPlanService:
             products = self._require_products(request.product_ids)
             practice = self._resolve_active_practice(request, hcp, hospital, department)
 
-            plan = self.repository.create_plan(
-                representative=representative,
-                hcp=hcp,
-                hospital=hospital,
-                department=department,
-                practice=practice,
-                products=products,
-                planned_at=request.planned_at.astimezone(UTC),
-            )
+            try:
+                plan = self.repository.create_plan(
+                    representative=representative,
+                    hcp=hcp,
+                    hospital=hospital,
+                    department=department,
+                    practice=practice,
+                    products=products,
+                    planned_at=request.planned_at.astimezone(UTC),
+                )
+            except IntegrityError as exc:
+                self._raise_create_integrity_error(exc, request)
 
             return CreatedVisitPlan(
                 id=plan.id,
@@ -263,20 +267,27 @@ class VisitPlanService:
                 hospital = plan.hcp_practice.hospital_department.hospital
                 latitude = request.latitude.quantize(Decimal("0.000001"))
                 longitude = request.longitude.quantize(Decimal("0.000001"))
-                distance = haversine_distance_meters(
-                    float(hospital.latitude),
-                    float(hospital.longitude),
-                    float(latitude),
-                    float(longitude),
+                check_in_at = self.clock.now().astimezone(UTC)
+                distance = Decimal(
+                    str(
+                        haversine_distance_meters(
+                            float(hospital.latitude),
+                            float(hospital.longitude),
+                            float(latitude),
+                            float(longitude),
+                        )
+                    )
                 )
+                check_in_finding = evaluate_check_in_distance(distance)
                 self.repository.create_visit(
                     plan=plan,
                     hospital_latitude=hospital.latitude,
                     hospital_longitude=hospital.longitude,
-                    check_in_at=self.clock.now().astimezone(UTC),
+                    check_in_at=check_in_at,
                     latitude=latitude,
                     longitude=longitude,
-                    distance_meters=Decimal(str(distance)).quantize(Decimal("0.000001")),
+                    distance_meters=distance.quantize(Decimal("0.000001")),
+                    check_in_finding=check_in_finding,
                 )
                 return plan
         except IntegrityError as exc:
@@ -462,27 +473,101 @@ class VisitPlanService:
                     ],
                 )
 
-            self.repository.replace_report(
-                visit=visit,
-                conversation_summary=request.conversation_summary,
-                hcp_feedback=request.hcp_feedback,
-                notes=request.notes,
-                submitted_at=self.clock.now().astimezone(UTC),
-                detailing_records=[
-                    (item.product_id, item.content_summary) for item in request.detailing_records
-                ],
-                material_distributions=[
-                    (
-                        item.product_id,
-                        item.material_code,
-                        item.material_name,
-                        item.quantity,
-                        item.is_compliant,
-                    )
-                    for item in request.material_distributions
-                ],
-            )
+            try:
+                self.repository.replace_report(
+                    visit=visit,
+                    conversation_summary=request.conversation_summary,
+                    hcp_feedback=request.hcp_feedback,
+                    notes=request.notes,
+                    submitted_at=self.clock.now().astimezone(UTC),
+                    detailing_records=[
+                        (item.product_id, item.content_summary)
+                        for item in request.detailing_records
+                    ],
+                    material_distributions=[
+                        (
+                            item.product_id,
+                            item.material_code,
+                            item.material_name,
+                            item.quantity,
+                            item.is_compliant,
+                        )
+                        for item in request.material_distributions
+                    ],
+                )
+            except IntegrityError as exc:
+                self._raise_report_integrity_error(exc, request)
             return plan
+
+    @staticmethod
+    def _raise_create_integrity_error(
+        exc: IntegrityError, request: CreateVisitPlanCommand
+    ) -> NoReturn:
+        constraint = _constraint_name(exc)
+        if constraint == "fk_visit_plans_mr_id_medical_representatives":
+            raise BusinessError(
+                code="MR_NOT_FOUND",
+                message="The medical representative was not found.",
+                status_code=404,
+                details=[ErrorDetail(field="mrId", reason="NOT_FOUND", value=request.mr_id)],
+            ) from exc
+        if constraint == "fk_visit_plans_hcp_practice_id_hcp_practices":
+            raise BusinessError(
+                code="HCP_PRACTICE_MISMATCH",
+                message="The HCP is not active in the specified hospital department.",
+                status_code=422,
+                details=[ErrorDetail(field="hcpId", reason="PRACTICE_MISMATCH")],
+            ) from exc
+        if constraint == "fk_visit_plan_products_product_id_products":
+            raise BusinessError(
+                code="PRODUCT_NOT_FOUND",
+                message="One or more products were not found.",
+                status_code=404,
+                details=[ErrorDetail(field="productIds", reason="NOT_FOUND")],
+            ) from exc
+        if constraint == "pk_visit_plan_products":
+            raise BusinessError(
+                code="DUPLICATE_PRODUCT_ID",
+                message="Product IDs must not contain duplicates.",
+                status_code=422,
+                details=[ErrorDetail(field="productIds", reason="DUPLICATE")],
+            ) from exc
+        raise exc
+
+    @staticmethod
+    def _raise_report_integrity_error(
+        exc: IntegrityError, request: UpsertVisitReportCommand
+    ) -> NoReturn:
+        constraint = _constraint_name(exc)
+        if constraint == "pk_academic_detailing_records":
+            raise BusinessError(
+                code="DUPLICATE_DETAILING_PRODUCT",
+                message="Detailing products must not contain duplicates.",
+                status_code=422,
+                details=[ErrorDetail(field="detailingRecords", reason="DUPLICATE_PRODUCT")],
+            ) from exc
+        if constraint in {
+            "fk_academic_detailing_records_visit_id_visit_products",
+            "fk_material_distributions_visit_id_visit_products",
+        }:
+            raise BusinessError(
+                code="REPORT_PRODUCT_NOT_IN_VISIT",
+                message="A report item references a product outside this visit.",
+                status_code=422,
+                details=[ErrorDetail(field="productId", reason="NOT_IN_VISIT")],
+            ) from exc
+        if constraint == "ck_material_distributions_quantity_nonnegative":
+            raise BusinessError(
+                code="INVALID_MATERIAL_QUANTITY",
+                message="Material quantity must be a non-negative integer.",
+                status_code=422,
+                details=[
+                    ErrorDetail(
+                        field="materialDistributions.quantity", reason="MUST_BE_NONNEGATIVE"
+                    )
+                ],
+            ) from exc
+        raise exc
 
     @staticmethod
     def _validate_range(

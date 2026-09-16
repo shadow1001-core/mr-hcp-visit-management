@@ -30,6 +30,7 @@ from app.db.models import (
     VisitProduct,
     VisitReport,
 )
+from app.domain.compliance import ComplianceFinding as DomainComplianceFinding
 from app.domain.compliance import ComplianceResult
 
 VISIT_STATUS = case(
@@ -221,6 +222,7 @@ class VisitPlanRepository:
         latitude: Decimal,
         longitude: Decimal,
         distance_meters: Decimal,
+        check_in_finding: DomainComplianceFinding | None,
     ) -> Visit:
         plan_products = list(
             self.session.scalars(
@@ -243,6 +245,20 @@ class VisitPlanRepository:
                 )
                 for product in plan_products
             ],
+            compliance_findings=(
+                [
+                    ComplianceFinding(
+                        code=ComplianceFindingCode(check_in_finding.code.value),
+                        phase=CompliancePhase(check_in_finding.phase.value),
+                        measured_value=check_in_finding.actual_value.quantize(Decimal("0.000001")),
+                        threshold_value=check_in_finding.threshold.quantize(Decimal("0.000001")),
+                        unit=ComplianceUnit(check_in_finding.unit.value),
+                        detected_at=check_in_at,
+                    )
+                ]
+                if check_in_finding is not None
+                else []
+            ),
         )
         self.session.add(visit)
         self.session.flush()
@@ -262,17 +278,23 @@ class VisitPlanRepository:
         visit.check_out_latitude = latitude
         visit.check_out_longitude = longitude
         visit.check_out_distance_meters = result.check_out_distance_meters.quantize(six_places)
-        visit.compliance_findings = [
-            ComplianceFinding(
-                code=ComplianceFindingCode(finding.code.value),
-                phase=CompliancePhase(finding.phase.value),
-                measured_value=finding.actual_value.quantize(six_places),
-                threshold_value=finding.threshold.quantize(six_places),
-                unit=ComplianceUnit(finding.unit.value),
-                detected_at=check_out_at,
-            )
-            for finding in result.findings
-        ]
+        existing_by_code = {str(finding.code): finding for finding in visit.compliance_findings}
+        for finding in result.findings:
+            code = ComplianceFindingCode(finding.code.value)
+            persisted = existing_by_code.get(str(code))
+            if persisted is None:
+                persisted = ComplianceFinding(code=code, visit=visit)
+                self.session.add(persisted)
+            persisted.phase = CompliancePhase(finding.phase.value)
+            persisted.measured_value = finding.actual_value.quantize(six_places)
+            persisted.threshold_value = finding.threshold.quantize(six_places)
+            persisted.unit = ComplianceUnit(finding.unit.value)
+            if persisted.detected_at is None:
+                persisted.detected_at = (
+                    visit.check_in_at
+                    if finding.phase.value == CompliancePhase.CHECK_IN.value
+                    else check_out_at
+                )
         self.session.flush()
         self.session.refresh(visit, attribute_names=["duration_seconds", "updated_at"])
 

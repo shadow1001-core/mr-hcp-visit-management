@@ -36,8 +36,8 @@ class DashboardRepository:
         eligible_visits = (
             select(
                 Visit.id.label("visit_id"),
-                Visit.check_out_at.is_(None).label("is_pending"),
-                and_(Visit.check_out_at.is_not(None), has_finding).label("is_abnormal"),
+                and_(Visit.check_out_at.is_(None), ~has_finding).label("is_pending"),
+                has_finding.label("is_abnormal"),
             )
             .where(Visit.check_in_at >= start_utc, Visit.check_in_at < end_utc)
             .cte("eligible_visits")

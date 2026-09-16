@@ -70,9 +70,13 @@ The Vite development server is available at `http://localhost:5173` and proxies 
 Run individual checks from the repository root:
 
 ```bash
+export TEST_DATABASE_URL=postgresql+psycopg://mr_hcp:your-password@localhost:5432/mr_hcp_test
 make backend-check
 make frontend-check
 ```
+
+Backend integration tests deliberately fail with a clear setup error when `TEST_DATABASE_URL`
+is missing; use a dedicated disposable PostgreSQL database because migrations reset its schema.
 
 Run all non-mutating checks:
 

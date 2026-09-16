@@ -352,6 +352,36 @@ def test_checked_in_visit_is_pending_not_normal(
     assert item["pendingCount"] == 1
 
 
+def test_checked_in_visit_with_location_finding_is_already_abnormal(
+    dashboard_context: DashboardApiContext,
+) -> None:
+    visit = _add_visit(
+        dashboard_context,
+        check_in_at=datetime(2026, 9, 10, 1, tzinfo=UTC),
+        product_codes=["PROD-CARD-001"],
+        check_out=False,
+    )
+    dashboard_context.session.add(
+        ComplianceFinding(
+            visit_id=visit.id,
+            code=ComplianceFindingCode.CHECKIN_TOO_FAR,
+            phase=CompliancePhase.CHECK_IN,
+            measured_value=Decimal("501"),
+            threshold_value=Decimal("500"),
+            unit=ComplianceUnit.METERS,
+            detected_at=visit.check_in_at,
+        )
+    )
+    dashboard_context.session.flush()
+
+    item = _get_dashboard(dashboard_context, "2026-09")["items"][0]
+
+    assert item["totalCount"] == 1
+    assert item["normalCount"] == 0
+    assert item["abnormalCount"] == 1
+    assert item["pendingCount"] == 0
+
+
 def test_business_month_uses_half_open_utc_boundaries(
     dashboard_context: DashboardApiContext,
 ) -> None:

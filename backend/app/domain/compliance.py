@@ -119,17 +119,10 @@ def evaluate_visit_compliance(data: VisitComplianceInput) -> ComplianceResult:
             )
         )
 
+    check_in_finding = evaluate_check_in_distance(check_in_distance)
+    if check_in_finding is not None:
+        findings.append(check_in_finding)
     distance_limit_with_tolerance = MAX_DISTANCE_METERS + DISTANCE_EPSILON_METERS
-    if check_in_distance > distance_limit_with_tolerance:
-        findings.append(
-            _finding(
-                FindingCode.CHECKIN_TOO_FAR,
-                check_in_distance,
-                MAX_DISTANCE_METERS,
-                FindingPhase.CHECK_IN,
-                FindingUnit.METERS,
-            )
-        )
     if check_out_distance > distance_limit_with_tolerance:
         findings.append(
             _finding(
@@ -146,6 +139,19 @@ def evaluate_visit_compliance(data: VisitComplianceInput) -> ComplianceResult:
         check_in_distance_meters=check_in_distance,
         check_out_distance_meters=check_out_distance,
         findings=tuple(findings),
+    )
+
+
+def evaluate_check_in_distance(distance_meters: Decimal) -> ComplianceFinding | None:
+    """Evaluate the check-in distance using the same boundary as a complete visit."""
+    if distance_meters <= MAX_DISTANCE_METERS + DISTANCE_EPSILON_METERS:
+        return None
+    return _finding(
+        FindingCode.CHECKIN_TOO_FAR,
+        distance_meters,
+        MAX_DISTANCE_METERS,
+        FindingPhase.CHECK_IN,
+        FindingUnit.METERS,
     )
 
 

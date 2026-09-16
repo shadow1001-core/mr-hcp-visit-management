@@ -210,7 +210,7 @@ def _actual_visit(visit: Visit) -> ActualVisitView:
     }
     findings = sorted(
         visit.compliance_findings,
-        key=lambda item: (item.detected_at, finding_order[str(item.code)]),
+        key=lambda item: (finding_order[str(item.code)], item.detected_at),
     )
     return ActualVisitView(
         check_in=VisitMomentView(

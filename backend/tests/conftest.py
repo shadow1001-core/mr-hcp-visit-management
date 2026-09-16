@@ -16,7 +16,10 @@ from app.core.config import get_settings
 def migrated_engine() -> Iterator[Engine]:
     database_url = os.getenv("TEST_DATABASE_URL")
     if database_url is None:
-        pytest.skip("TEST_DATABASE_URL is required for PostgreSQL integration tests")
+        pytest.fail(
+            "TEST_DATABASE_URL is required for PostgreSQL integration tests",
+            pytrace=False,
+        )
 
     previous_database_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = database_url

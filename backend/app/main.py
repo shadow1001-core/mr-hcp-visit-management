@@ -5,6 +5,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.error_handlers import (
     business_error_handler,
     http_error_handler,
+    unhandled_error_handler,
     validation_error_handler,
 )
 from app.api.router import api_router
@@ -22,4 +23,5 @@ app = FastAPI(
 app.add_exception_handler(BusinessError, business_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.add_exception_handler(StarletteHTTPException, http_error_handler)
+app.add_exception_handler(Exception, unhandled_error_handler)
 app.include_router(api_router)
